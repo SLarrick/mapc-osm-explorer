@@ -1,0 +1,105 @@
+{
+  "snapshot": "2026-04",
+  "source": "Geofabrik Massachusetts extract, clipped to MAPC boundary",
+  "license": "Data \u00a9 OpenStreetMap contributors (ODbL)",
+  "categories": [
+    {
+      "slug": "public-safety-and-health",
+      "label": "Public Safety & Health",
+      "file": "public-safety-and-health.parquet",
+      "feature_count": 9042,
+      "file_size_bytes": 365937,
+      "simplified": false
+    },
+    {
+      "slug": "transit",
+      "label": "Transit",
+      "file": "transit.parquet",
+      "feature_count": 10144,
+      "file_size_bytes": 533329,
+      "simplified": false
+    },
+    {
+      "slug": "food-access",
+      "label": "Food Access",
+      "file": "food-access.parquet",
+      "feature_count": 6909,
+      "file_size_bytes": 810463,
+      "simplified": false
+    },
+    {
+      "slug": "civic-and-government",
+      "label": "Civic & Government",
+      "file": "civic-and-government.parquet",
+      "feature_count": 484,
+      "file_size_bytes": 90760,
+      "simplified": false
+    },
+    {
+      "slug": "community-facilities",
+      "label": "Community Facilities",
+      "file": "community-facilities.parquet",
+      "feature_count": 3911,
+      "file_size_bytes": 957390,
+      "simplified": false
+    },
+    {
+      "slug": "parks-and-recreation",
+      "label": "Parks & Recreation",
+      "file": "parks-and-recreation.parquet",
+      "feature_count": 20196,
+      "file_size_bytes": 5286086,
+      "simplified": false
+    },
+    {
+      "slug": "active-transportation",
+      "label": "Active Transportation",
+      "file": "active-transportation.parquet",
+      "feature_count": 165574,
+      "file_size_bytes": 17643492,
+      "simplified": false
+    },
+    {
+      "slug": "streetscape",
+      "label": "Streetscape",
+      "file": "streetscape.parquet",
+      "feature_count": 165955,
+      "file_size_bytes": 6092465,
+      "simplified": false
+    },
+    {
+      "slug": "natural-features-and-green-infrastructure",
+      "label": "Natural Features & Green Infrastructure",
+      "file": "natural-features-and-green-infrastructure.parquet",
+      "feature_count": 87369,
+      "file_size_bytes": 24547366,
+      "simplified": false
+    },
+    {
+      "slug": "streets-and-roadways",
+      "label": "Streets & Roadways",
+      "file": "streets-and-roadways.parquet",
+      "feature_count": 242224,
+      "file_size_bytes": 32704605,
+      "simplified": false
+    },
+    {
+      "slug": "housing-and-land-use",
+      "label": "Housing & Land Use",
+      "file": "housing-and-land-use.parquet",
+      "feature_count": 5202,
+      "file_size_bytes": 1316727,
+      "simplified": false
+    },
+    {
+      "slug": "buildings-and-addresses",
+      "label": "Buildings & Addresses",
+      "file": "buildings-and-addresses.parquet",
+      "feature_count": 1024546,
+      "file_size_bytes": 97071704,
+      "simplified": true
+    }
+  ],
+  "total_features": 1741556,
+  "total_bytes": 187420324
+}
