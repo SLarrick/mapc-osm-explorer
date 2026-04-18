@@ -1,3 +1,5 @@
+import { MapView } from "./components/MapView";
+
 function App() {
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col">
@@ -40,8 +42,8 @@ function App() {
         </section>
 
         <section className="max-w-6xl mx-auto px-6 pb-20">
-          <div className="aspect-[16/9] rounded-lg border border-slate-200 bg-white flex items-center justify-center text-slate-400">
-            Map of the MAPC region will render here
+          <div className="h-[540px]">
+            <MapView />
           </div>
         </section>
       </main>
