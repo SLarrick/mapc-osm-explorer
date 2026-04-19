@@ -22,6 +22,11 @@ interface MapViewProps {
   /** Optional overlay of query-result features. When it changes, the map
    *  rerenders the `results-data` source and fits to its bbox. */
   results?: GeoJSON.FeatureCollection<GeoJSON.Geometry> | null;
+  /** Currently-selected feature id (matches top-level `feature.id`). */
+  selectedId?: string | null;
+  /** Called with a feature id on click, or null when the user clicks
+   *  empty map space to deselect. */
+  onSelectFeature?: (id: string | null) => void;
 }
 
 // Layer ids we hit-test for the hover tooltip. The circle layer rides the
@@ -39,11 +44,16 @@ const RESULT_LAYER_IDS = [
 const Z_SHAPES_FADE_START = 12.5;
 const Z_SHAPES_FADE_END = 14;
 
-export function MapView({ results }: MapViewProps) {
+export function MapView({ results, selectedId, onSelectFeature }: MapViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const mapReadyRef = useRef(false);
   const popupRef = useRef<maplibregl.Popup | null>(null);
+  // Keep latest callback in a ref so the one-shot click handler below
+  // always sees the current closure.
+  const onSelectRef = useRef(onSelectFeature);
+  onSelectRef.current = onSelectFeature;
+  const prevSelectedIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -164,9 +174,34 @@ export function MapView({ results }: MapViewProps) {
         /* fallback to initial center/zoom */
       }
 
+      // Click anywhere on the map: either select the topmost result
+      // feature under the cursor, or deselect if we clicked empty space.
+      map.on("click", (e) => {
+        const features = map.queryRenderedFeatures(e.point, {
+          layers: RESULT_LAYER_IDS.filter((id) =>
+            Boolean(map.getLayer(id)),
+          ),
+        });
+        if (features.length > 0) {
+          const f = features[0];
+          const id =
+            (typeof f.id === "string" || typeof f.id === "number"
+              ? String(f.id)
+              : (f.properties as { uid?: string } | null)?.uid) ?? null;
+          onSelectRef.current?.(id);
+        } else {
+          onSelectRef.current?.(null);
+        }
+      });
+
       mapReadyRef.current = true;
       // If results arrived before map finished loading, render them now
       if (resultsRef.current) renderResults(map, popup, resultsRef.current);
+      // And re-apply selection if it was set before map was ready
+      if (prevSelectedIdRef.current !== selectedIdRef.current) {
+        applySelection(map, prevSelectedIdRef.current, selectedIdRef.current);
+        prevSelectedIdRef.current = selectedIdRef.current;
+      }
     });
 
     return () => {
@@ -185,7 +220,21 @@ export function MapView({ results }: MapViewProps) {
     const popup = popupRef.current;
     if (!map || !popup || !mapReadyRef.current) return;
     renderResults(map, popup, results ?? null);
+    // Re-apply selection after data swap — feature-state is cleared when
+    // source data changes, so we need to reassert it.
+    applySelection(map, null, selectedIdRef.current);
   }, [results]);
+
+  // Sync selectedId prop → MapLibre feature-state on both result sources
+  const selectedIdRef = useRef<string | null>(selectedId ?? null);
+  useEffect(() => {
+    const next = selectedId ?? null;
+    selectedIdRef.current = next;
+    const map = mapRef.current;
+    if (!map || !mapReadyRef.current) return;
+    applySelection(map, prevSelectedIdRef.current, next);
+    prevSelectedIdRef.current = next;
+  }, [selectedId]);
 
   return (
     <div
@@ -252,6 +301,20 @@ function renderResults(
         peak,
       ] as maplibregl.ExpressionSpecification;
 
+    // Colors — amber for selected, sky for unselected.
+    const FILL_COLOR: maplibregl.ExpressionSpecification = [
+      "case",
+      ["boolean", ["feature-state", "selected"], false],
+      "#f59e0b", // amber-500
+      "#0284c7", // sky-600
+    ];
+    const STROKE_COLOR: maplibregl.ExpressionSpecification = [
+      "case",
+      ["boolean", ["feature-state", "selected"], false],
+      "#b45309", // amber-700
+      "#0369a1", // sky-700
+    ];
+
     // Polygon fill
     map.addLayer({
       id: "results-fill",
@@ -259,8 +322,15 @@ function renderResults(
       source: "results-data",
       filter: ["==", ["geometry-type"], "Polygon"],
       paint: {
-        "fill-color": "#0284c7", // sky-600
-        "fill-opacity": fadeInOpacity(0.3),
+        "fill-color": FILL_COLOR,
+        // Selected features stay bright at all zooms. Unselected use the
+        // zoom-driven fade.
+        "fill-opacity": [
+          "case",
+          ["boolean", ["feature-state", "selected"], false],
+          0.5,
+          fadeInOpacity(0.3),
+        ],
       },
     });
 
@@ -271,9 +341,19 @@ function renderResults(
       source: "results-data",
       filter: ["==", ["geometry-type"], "Polygon"],
       paint: {
-        "line-color": "#0369a1", // sky-700
-        "line-width": fadeInWidth(1.8),
-        "line-opacity": fadeInOpacity(1),
+        "line-color": STROKE_COLOR,
+        "line-width": [
+          "case",
+          ["boolean", ["feature-state", "selected"], false],
+          2.5,
+          fadeInWidth(1.8),
+        ],
+        "line-opacity": [
+          "case",
+          ["boolean", ["feature-state", "selected"], false],
+          1,
+          fadeInOpacity(1),
+        ],
       },
     });
 
@@ -284,9 +364,19 @@ function renderResults(
       source: "results-data",
       filter: ["==", ["geometry-type"], "LineString"],
       paint: {
-        "line-color": "#0369a1",
-        "line-width": fadeInWidth(2.4),
-        "line-opacity": fadeInOpacity(1),
+        "line-color": STROKE_COLOR,
+        "line-width": [
+          "case",
+          ["boolean", ["feature-state", "selected"], false],
+          3.2,
+          fadeInWidth(2.4),
+        ],
+        "line-opacity": [
+          "case",
+          ["boolean", ["feature-state", "selected"], false],
+          1,
+          fadeInOpacity(1),
+        ],
       },
     });
 
@@ -298,25 +388,35 @@ function renderResults(
       source: "results-centroids",
       paint: {
         "circle-radius": [
-          "interpolate",
-          ["linear"],
-          ["zoom"],
-          10,
-          8,
-          13,
-          10,
-          16,
-          6,
+          "case",
+          ["boolean", ["feature-state", "selected"], false],
+          14,
+          [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            10, 8,
+            13, 10,
+            16, 6,
+          ],
         ],
-        "circle-color": "#0ea5e9",
+        "circle-color": [
+          "case",
+          ["boolean", ["feature-state", "selected"], false],
+          "#f59e0b", // amber-500
+          "#0ea5e9", // sky-500
+        ],
         "circle-opacity": [
-          "interpolate",
-          ["linear"],
-          ["zoom"],
-          12,
-          0.18,
-          15,
-          0,
+          "case",
+          ["boolean", ["feature-state", "selected"], false],
+          0.35,
+          [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            12, 0.18,
+            15, 0,
+          ],
         ],
       },
     });
@@ -326,36 +426,49 @@ function renderResults(
       source: "results-centroids",
       paint: {
         "circle-radius": [
-          "interpolate",
-          ["linear"],
-          ["zoom"],
-          10,
-          4.5,
-          13,
-          5,
-          16,
-          3.5,
+          "case",
+          ["boolean", ["feature-state", "selected"], false],
+          7,
+          [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            10, 4.5,
+            13, 5,
+            16, 3.5,
+          ],
         ],
-        "circle-color": "#0284c7",
+        "circle-color": [
+          "case",
+          ["boolean", ["feature-state", "selected"], false],
+          "#f59e0b", // amber-500
+          "#0284c7", // sky-600
+        ],
         "circle-stroke-width": 1.5,
         "circle-stroke-color": "#ffffff",
         "circle-opacity": [
-          "interpolate",
-          ["linear"],
-          ["zoom"],
-          13,
+          "case",
+          ["boolean", ["feature-state", "selected"], false],
           1,
-          16,
-          0.6,
+          [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            13, 1,
+            16, 0.6,
+          ],
         ],
         "circle-stroke-opacity": [
-          "interpolate",
-          ["linear"],
-          ["zoom"],
-          13,
+          "case",
+          ["boolean", ["feature-state", "selected"], false],
           1,
-          16,
-          0.6,
+          [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            13, 1,
+            16, 0.6,
+          ],
         ],
       },
     });
@@ -405,6 +518,26 @@ function renderResults(
     }
   } else {
     popup.remove();
+  }
+}
+
+/**
+ * Flip MapLibre `feature-state: selected` off the previous feature and
+ * on for the next one, across both results-data and results-centroids.
+ */
+function applySelection(
+  map: maplibregl.Map,
+  prev: string | null,
+  next: string | null,
+): void {
+  if (!map.getSource("results-data")) return;
+  for (const source of ["results-data", "results-centroids"]) {
+    if (prev) {
+      map.setFeatureState({ source, id: prev }, { selected: false });
+    }
+    if (next) {
+      map.setFeatureState({ source, id: next }, { selected: true });
+    }
   }
 }
 

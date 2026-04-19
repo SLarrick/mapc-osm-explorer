@@ -8,7 +8,13 @@ import { parseWkbGeometry } from "./wkb";
 import { getMunicipalityBySlug, pointInArea } from "./geo";
 
 export interface ResultFeature extends GeoJSON.Feature<GeoJSON.Geometry> {
+  /** Stable per-feature id: "${osm_type}/${osm_id}" (e.g. "way/12345"). Used
+   *  by MapLibre feature-state for selection styling + by callers to look up
+   *  a feature by click. Set as the top-level GeoJSON id so no promoteId
+   *  is needed on the source. */
+  id: string;
   properties: {
+    uid: string;
     osm_id: number;
     osm_type: string;
     name: string | null;
@@ -66,11 +72,15 @@ export async function findPlaygroundsInMuni(
       /* tolerate bad JSON */
     }
 
+    const osmId = Number(row.osm_id);
+    const uid = `${row.osm_type}/${osmId}`;
     features.push({
+      id: uid,
       type: "Feature",
       geometry: parsed.geometry,
       properties: {
-        osm_id: Number(row.osm_id),
+        uid,
+        osm_id: osmId,
         osm_type: row.osm_type,
         name: row.name,
         tags: parsedTags,

@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { MapView } from "./components/MapView";
-import { findPlaygroundsInMuni } from "./lib/queries";
+import { DetailPanel, downloadGeoJSON } from "./components/DetailPanel";
+import { findPlaygroundsInMuni, type ResultFeature } from "./lib/queries";
 
 function App() {
   const [results, setResults] = useState<
@@ -8,10 +9,12 @@ function App() {
   >(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
   async function handleFind() {
     setLoading(true);
     setError(null);
+    setSelectedId(null);
     try {
       const fc = await findPlaygroundsInMuni("salem");
       setResults(fc);
@@ -24,6 +27,17 @@ function App() {
   }
 
   const count = results?.features.length ?? 0;
+
+  const selectedFeature = useMemo<ResultFeature | null>(() => {
+    if (!selectedId || !results) return null;
+    const f = results.features.find((feat) => feat.id === selectedId) ?? null;
+    return f as ResultFeature | null;
+  }, [selectedId, results]);
+
+  function handleDownloadAll() {
+    if (!results) return;
+    downloadGeoJSON(results, "playgrounds-salem.geojson");
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col">
@@ -66,23 +80,60 @@ function App() {
           >
             {loading ? "Finding…" : "Find data →"}
           </button>
-          <p className="mt-4 text-sm text-slate-500 min-h-[1.25rem]">
+          <div className="mt-4 text-sm text-slate-500 min-h-[1.25rem] flex items-center justify-center gap-3">
             {error ? (
               <span className="text-red-600">Error: {error}</span>
             ) : results ? (
               <>
-                Found <strong>{count}</strong> playground
-                {count === 1 ? "" : "s"} in Salem.
+                <span>
+                  Found <strong>{count}</strong> playground
+                  {count === 1 ? "" : "s"} in Salem.
+                </span>
+                {count > 0 && (
+                  <button
+                    onClick={handleDownloadAll}
+                    className="text-sky-700 hover:text-sky-900 hover:underline inline-flex items-center gap-1"
+                  >
+                    Download GeoJSON
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      width="12"
+                      height="12"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                      <polyline points="7 10 12 15 17 10"></polyline>
+                      <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                  </button>
+                )}
               </>
             ) : (
-              <>Slice 1b: hardcoded demo query. Dropdowns coming in Slice 2.</>
+              <span>
+                Slice 1c: click any feature for details. Dropdowns in Slice 2.
+              </span>
             )}
-          </p>
+          </div>
         </section>
 
         <section className="max-w-6xl mx-auto px-6 pb-20">
-          <div className="h-[540px]">
-            <MapView results={results} />
+          <div className="h-[540px] relative">
+            <MapView
+              results={results}
+              selectedId={selectedId}
+              onSelectFeature={setSelectedId}
+            />
+            {selectedFeature && (
+              <DetailPanel
+                feature={selectedFeature}
+                onClose={() => setSelectedId(null)}
+              />
+            )}
           </div>
         </section>
       </main>
