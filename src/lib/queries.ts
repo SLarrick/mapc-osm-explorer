@@ -3,7 +3,7 @@
  * ready to render on the map (with tags preserved as properties).
  */
 import { runSql } from "./duckdb";
-import { parseWkbPointAsLngLat } from "./wkb";
+import { parseWkbBboxCenter } from "./wkb";
 import { getMunicipalityBySlug, pointInArea } from "./geo";
 
 export interface ResultFeature extends GeoJSON.Feature<GeoJSON.Point> {
@@ -28,8 +28,10 @@ type RawRow = {
  * falls within the given municipality.
  *
  * SQL side: pulls candidate rows (only the 1,868 playgrounds in MAPC).
- * JS side: parses WKB, filters by polygon. Swap to DuckDB-spatial
- * server-side once we load the extension (v1.5).
+ * JS side: parses WKB into a representative point (bbox center for
+ * polygon/line geoms, true coords for nodes), then filters by polygon.
+ * Swap to DuckDB-spatial server-side (ST_Within) once we load the
+ * extension in v1.5.
  */
 export async function findPlaygroundsInMuni(
   muniSlug: string,
@@ -53,8 +55,8 @@ export async function findPlaygroundsInMuni(
   const muniGeom = muni.geometry as GeoJSON.Polygon | GeoJSON.MultiPolygon;
 
   for (const row of rows) {
-    const lngLat = parseWkbPointAsLngLat(row.geometry_wkb);
-    if (!lngLat) continue; // not a point (way-based playground) — TODO: handle polygons
+    const lngLat = parseWkbBboxCenter(row.geometry_wkb);
+    if (!lngLat) continue; // malformed WKB — skip
     if (!pointInArea(lngLat, muniGeom)) continue;
 
     let parsedTags: Record<string, string> = {};
