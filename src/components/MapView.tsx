@@ -24,12 +24,20 @@ interface MapViewProps {
   results?: GeoJSON.FeatureCollection<GeoJSON.Geometry> | null;
 }
 
-// Layer ids we hit-test for the hover tooltip
+// Layer ids we hit-test for the hover tooltip. The circle layer rides the
+// centroids source so it covers both native points and polygon centroids.
 const RESULT_LAYER_IDS = [
   "results-fill",
   "results-line",
   "results-circle",
 ];
+
+// Zoom thresholds for the cross-fade between "pins" and "real shapes".
+// At MAPC-region zoom (~8.4) the polygons would be a few pixels across —
+// invisible. So we show uniform pins until you're clearly inside a muni
+// (z ≥ 12.5), then fade the shapes in and shrink the pins.
+const Z_SHAPES_FADE_START = 12.5;
+const Z_SHAPES_FADE_END = 14;
 
 export function MapView({ results }: MapViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -188,10 +196,11 @@ export function MapView({ results }: MapViewProps) {
 }
 
 /**
- * Add or update the `results-data` source + its three typed layers
- * (fill+outline for polygons, line for linestrings, circle+halo for
- * points). Also wires hover handlers that show a tooltip with the
- * feature name.
+ * Add or update the `results-data` + `results-centroids` sources and
+ * their layers. Zoom-interpolated paint properties cross-fade between
+ * "pins only" (low zoom) and "real shapes" (high zoom), so the overlay
+ * reads consistently from regional zoom down to neighborhood zoom.
+ * Hover on any interactive layer pops a tooltip with the feature name.
  */
 function renderResults(
   map: maplibregl.Map,
@@ -203,6 +212,7 @@ function renderResults(
     features: [],
   };
   const data = results ?? empty;
+  const centroids = centroidsOf(data);
 
   const existing = map.getSource("results-data") as
     | maplibregl.GeoJSONSource
@@ -210,22 +220,47 @@ function renderResults(
 
   if (existing) {
     existing.setData(data);
+    const existingCentroids = map.getSource("results-centroids") as
+      | maplibregl.GeoJSONSource
+      | undefined;
+    existingCentroids?.setData(centroids);
   } else {
     map.addSource("results-data", { type: "geojson", data });
+    map.addSource("results-centroids", { type: "geojson", data: centroids });
 
-    // Polygon fill (drawn first so outlines/points sit on top)
+    // Shared zoom expressions. Polygons/lines fade in as you zoom past
+    // the muni-scale threshold; circles shrink + fade so they act as
+    // gentle anchor dots at high zoom rather than competing with shapes.
+    const fadeInOpacity = (peak: number) =>
+      [
+        "interpolate",
+        ["linear"],
+        ["zoom"],
+        Z_SHAPES_FADE_START,
+        0,
+        Z_SHAPES_FADE_END,
+        peak,
+      ] as maplibregl.ExpressionSpecification;
+    const fadeInWidth = (peak: number) =>
+      [
+        "interpolate",
+        ["linear"],
+        ["zoom"],
+        Z_SHAPES_FADE_START,
+        0,
+        Z_SHAPES_FADE_END,
+        peak,
+      ] as maplibregl.ExpressionSpecification;
+
+    // Polygon fill
     map.addLayer({
       id: "results-fill",
       type: "fill",
       source: "results-data",
-      filter: [
-        "any",
-        ["==", ["geometry-type"], "Polygon"],
-        ["==", ["geometry-type"], "MultiPolygon"],
-      ],
+      filter: ["==", ["geometry-type"], "Polygon"],
       paint: {
         "fill-color": "#0284c7", // sky-600
-        "fill-opacity": 0.25,
+        "fill-opacity": fadeInOpacity(0.3),
       },
     });
 
@@ -234,14 +269,11 @@ function renderResults(
       id: "results-outline",
       type: "line",
       source: "results-data",
-      filter: [
-        "any",
-        ["==", ["geometry-type"], "Polygon"],
-        ["==", ["geometry-type"], "MultiPolygon"],
-      ],
+      filter: ["==", ["geometry-type"], "Polygon"],
       paint: {
         "line-color": "#0369a1", // sky-700
-        "line-width": 1.8,
+        "line-width": fadeInWidth(1.8),
+        "line-opacity": fadeInOpacity(1),
       },
     });
 
@@ -250,39 +282,81 @@ function renderResults(
       id: "results-line",
       type: "line",
       source: "results-data",
-      filter: [
-        "any",
-        ["==", ["geometry-type"], "LineString"],
-        ["==", ["geometry-type"], "MultiLineString"],
-      ],
+      filter: ["==", ["geometry-type"], "LineString"],
       paint: {
         "line-color": "#0369a1",
-        "line-width": 2.4,
+        "line-width": fadeInWidth(2.4),
+        "line-opacity": fadeInOpacity(1),
       },
     });
 
-    // Point halo + core
+    // Centroid halo + dot. Every feature (point or polygon) gets an
+    // anchor pin from the centroids source.
     map.addLayer({
       id: "results-halo",
       type: "circle",
-      source: "results-data",
-      filter: ["==", ["geometry-type"], "Point"],
+      source: "results-centroids",
       paint: {
-        "circle-radius": 10,
+        "circle-radius": [
+          "interpolate",
+          ["linear"],
+          ["zoom"],
+          10,
+          8,
+          13,
+          10,
+          16,
+          6,
+        ],
         "circle-color": "#0ea5e9",
-        "circle-opacity": 0.18,
+        "circle-opacity": [
+          "interpolate",
+          ["linear"],
+          ["zoom"],
+          12,
+          0.18,
+          15,
+          0,
+        ],
       },
     });
     map.addLayer({
       id: "results-circle",
       type: "circle",
-      source: "results-data",
-      filter: ["==", ["geometry-type"], "Point"],
+      source: "results-centroids",
       paint: {
-        "circle-radius": 5,
+        "circle-radius": [
+          "interpolate",
+          ["linear"],
+          ["zoom"],
+          10,
+          4.5,
+          13,
+          5,
+          16,
+          3.5,
+        ],
         "circle-color": "#0284c7",
         "circle-stroke-width": 1.5,
         "circle-stroke-color": "#ffffff",
+        "circle-opacity": [
+          "interpolate",
+          ["linear"],
+          ["zoom"],
+          13,
+          1,
+          16,
+          0.6,
+        ],
+        "circle-stroke-opacity": [
+          "interpolate",
+          ["linear"],
+          ["zoom"],
+          13,
+          1,
+          16,
+          0.6,
+        ],
       },
     });
 
@@ -372,6 +446,44 @@ function walkCoords(
     }
   };
   if ("coordinates" in geom) recurse(geom.coordinates);
+}
+
+/**
+ * Project each feature to a Point at the bbox-center of its geometry,
+ * preserving properties. Native Point features are passed through
+ * unchanged. Used to drive the always-on "anchor pin" circle layers.
+ */
+function centroidsOf(
+  fc: GeoJSON.FeatureCollection<GeoJSON.Geometry>,
+): GeoJSON.FeatureCollection<GeoJSON.Point> {
+  const out: GeoJSON.Feature<GeoJSON.Point>[] = [];
+  for (const f of fc.features) {
+    const center = bboxCenter(f.geometry);
+    if (!center) continue;
+    out.push({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: center },
+      properties: f.properties,
+    });
+  }
+  return { type: "FeatureCollection", features: out };
+}
+
+function bboxCenter(
+  geom: GeoJSON.Geometry | null,
+): [number, number] | null {
+  let minX = Infinity,
+    minY = Infinity,
+    maxX = -Infinity,
+    maxY = -Infinity;
+  walkCoords(geom, (x, y) => {
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  });
+  if (minX === Infinity) return null;
+  return [(minX + maxX) / 2, (minY + maxY) / 2];
 }
 
 function escapeHtml(s: string): string {
