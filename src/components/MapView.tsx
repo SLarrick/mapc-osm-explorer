@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
+import { bboxOfPoints } from "../lib/geo";
 
 /**
  * Base map centered on MAPC region.
@@ -9,8 +10,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
  *   - Light vector base from OpenFreeMap Positron (no API key required)
  *   - MAPC outer boundary as a thick soft outline
  *   - Municipality polygons with hover highlight
- *
- * In Slice 1b this will gain a query-results overlay; for now it's the scaffold.
+ *   - Optional query-results layer (points) supplied via props
  */
 const BASE_STYLE = "https://tiles.openfreemap.org/styles/positron";
 
@@ -18,9 +18,16 @@ const BASE_STYLE = "https://tiles.openfreemap.org/styles/positron";
 const INITIAL_CENTER: [number, number] = [-71.06, 42.36];
 const INITIAL_ZOOM = 8.4;
 
-export function MapView() {
+interface MapViewProps {
+  /** Optional overlay of query-result points. When it changes, the map
+   *  rerenders the `results` source and fits to its bbox. */
+  results?: GeoJSON.FeatureCollection<GeoJSON.Point> | null;
+}
+
+export function MapView({ results }: MapViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
+  const mapReadyRef = useRef(false);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -139,13 +146,27 @@ export function MapView() {
       } catch {
         /* fallback to initial center/zoom */
       }
+
+      mapReadyRef.current = true;
+      // If results arrived before map finished loading, render them now
+      if (resultsRef.current) renderResults(map, resultsRef.current);
     });
 
     return () => {
       map.remove();
       mapRef.current = null;
+      mapReadyRef.current = false;
     };
   }, []);
+
+  // Keep the latest results in a ref so the load handler can see them
+  const resultsRef = useRef<typeof results>(null);
+  useEffect(() => {
+    resultsRef.current = results ?? null;
+    const map = mapRef.current;
+    if (!map || !mapReadyRef.current) return;
+    renderResults(map, results ?? null);
+  }, [results]);
 
   return (
     <div
@@ -153,6 +174,66 @@ export function MapView() {
       className="w-full h-full min-h-[480px] rounded-lg overflow-hidden border border-slate-200 bg-slate-100"
     />
   );
+}
+
+/**
+ * Add or update a `results-points` source + `results-circle` layer. When
+ * `results` is null or empty, the source is cleared and the map refits to
+ * the MAPC boundary.
+ */
+function renderResults(
+  map: maplibregl.Map,
+  results: GeoJSON.FeatureCollection<GeoJSON.Point> | null,
+): void {
+  const empty: GeoJSON.FeatureCollection<GeoJSON.Point> = {
+    type: "FeatureCollection",
+    features: [],
+  };
+  const data = results ?? empty;
+
+  const existing = map.getSource("results-points") as
+    | maplibregl.GeoJSONSource
+    | undefined;
+  if (existing) {
+    existing.setData(data);
+  } else {
+    map.addSource("results-points", { type: "geojson", data });
+    map.addLayer({
+      id: "results-halo",
+      type: "circle",
+      source: "results-points",
+      paint: {
+        "circle-radius": 10,
+        "circle-color": "#0ea5e9", // sky-500
+        "circle-opacity": 0.18,
+      },
+    });
+    map.addLayer({
+      id: "results-circle",
+      type: "circle",
+      source: "results-points",
+      paint: {
+        "circle-radius": 5,
+        "circle-color": "#0284c7", // sky-600
+        "circle-stroke-width": 1.5,
+        "circle-stroke-color": "#ffffff",
+      },
+    });
+  }
+
+  if (data.features.length > 0) {
+    const pts = data.features.map(
+      (f) => f.geometry.coordinates as [number, number],
+    );
+    const bbox = bboxOfPoints(pts);
+    if (bbox) {
+      map.fitBounds(bbox as [number, number, number, number], {
+        padding: 60,
+        maxZoom: 14,
+        duration: 600,
+      });
+    }
+  }
 }
 
 /** Minimal GeoJSON bbox without pulling in turf. Accepts Feature or FeatureCollection. */
