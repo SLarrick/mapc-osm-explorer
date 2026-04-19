@@ -1,13 +1,14 @@
 /**
- * Minimal WKB (Well-Known Binary) geometry parser.
+ * WKB (Well-Known Binary) → GeoJSON geometry parser.
  *
- * Our parquet files store geometries as WKB blobs. Playgrounds (and most
- * OSM features) are a mix of POINTs (nodes) and POLYGONs (closed ways).
- * For rendering as map pins we just need a representative point per
- * feature, so `parseWkbBboxCenter` walks any geometry and returns the
- * midpoint of its bounding box — adequate for small features, cheap, and
- * supports every WKB type we emit (POINT, LINESTRING, POLYGON,
- * MULTI*, GEOMETRYCOLLECTION).
+ * Our parquet files store geometries as WKB blobs. Features are a mix of
+ * POINTs (nodes), LINESTRINGs (un-closeable ways), and POLYGONs (closed
+ * ways). MULTIPOLYGON and GEOMETRYCOLLECTION are possible once we add
+ * relation support.
+ *
+ * `parseWkbGeometry` returns a full GeoJSON geometry object alongside its
+ * bbox — the caller can render the real shape on the map, and use the
+ * bbox center as a cheap "representative point" for muni filtering.
  *
  * WKB wire format (per OGC):
  *   byte 0:   endianness (0 = big, 1 = little)
@@ -19,7 +20,7 @@
 
 export type LngLat = readonly [number, number];
 
-interface BboxCursor {
+interface Cursor {
   off: number;
   minX: number;
   minY: number;
@@ -27,103 +28,135 @@ interface BboxCursor {
   maxY: number;
 }
 
-/**
- * Strict POINT parser — returns the coordinates only if the WKB is a
- * plain POINT. For mixed geometry sources, prefer `parseWkbBboxCenter`.
- */
-export function parseWkbPointAsLngLat(wkb: Uint8Array): LngLat | null {
-  if (wkb.length < 21) return null;
-  const view = new DataView(wkb.buffer, wkb.byteOffset, wkb.byteLength);
-  const littleEndian = view.getUint8(0) === 1;
-  const type = view.getUint32(1, littleEndian);
-  if (type !== 1) return null;
-  const x = view.getFloat64(5, littleEndian);
-  const y = view.getFloat64(13, littleEndian);
-  return [x, y];
+/** Result of a successful WKB parse: a GeoJSON geometry + its bbox center. */
+export interface WkbParseResult {
+  geometry: GeoJSON.Geometry;
+  center: LngLat;
+  bbox: [number, number, number, number];
 }
 
 /**
- * Return the midpoint of the bounding box of any WKB geometry. Null if
- * the WKB is malformed or contains no coordinates.
+ * Parse a WKB blob into a GeoJSON geometry. Supports POINT, LINESTRING,
+ * POLYGON, MULTIPOINT, MULTILINESTRING, MULTIPOLYGON, GEOMETRYCOLLECTION.
+ * Returns null for malformed input.
  */
-export function parseWkbBboxCenter(wkb: Uint8Array): LngLat | null {
+export function parseWkbGeometry(wkb: Uint8Array): WkbParseResult | null {
   if (wkb.length < 5) return null;
   const view = new DataView(wkb.buffer, wkb.byteOffset, wkb.byteLength);
-  const b: BboxCursor = {
+  const c: Cursor = {
     off: 0,
     minX: Infinity,
     minY: Infinity,
     maxX: -Infinity,
     maxY: -Infinity,
   };
+  let geom: GeoJSON.Geometry;
   try {
-    walkGeom(view, b);
+    geom = readGeom(view, c);
   } catch {
     return null;
   }
-  if (b.minX === Infinity) return null;
-  return [(b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2];
+  if (c.minX === Infinity) return null;
+  return {
+    geometry: geom,
+    center: [(c.minX + c.maxX) / 2, (c.minY + c.maxY) / 2],
+    bbox: [c.minX, c.minY, c.maxX, c.maxY],
+  };
 }
 
-function walkGeom(view: DataView, b: BboxCursor): void {
-  const endian = view.getUint8(b.off) === 1;
-  b.off += 1;
-  const rawType = view.getUint32(b.off, endian);
-  b.off += 4;
+function readGeom(view: DataView, c: Cursor): GeoJSON.Geometry {
+  const endian = view.getUint8(c.off) === 1;
+  c.off += 1;
+  const rawType = view.getUint32(c.off, endian);
+  c.off += 4;
   // Strip Z/M/SRID flags — base type lives in the low byte.
   const type = rawType & 0xff;
 
   switch (type) {
-    case 1: // POINT
-      readPoints(view, b, endian, 1);
-      return;
+    case 1: {
+      // POINT
+      const [x, y] = readPoint(view, c, endian);
+      return { type: "Point", coordinates: [x, y] };
+    }
     case 2: {
       // LINESTRING
-      const n = view.getUint32(b.off, endian);
-      b.off += 4;
-      readPoints(view, b, endian, n);
-      return;
+      const coords = readLineString(view, c, endian);
+      return { type: "LineString", coordinates: coords };
     }
     case 3: {
-      // POLYGON: numRings, then each ring = numPoints + points
-      const numRings = view.getUint32(b.off, endian);
-      b.off += 4;
-      for (let r = 0; r < numRings; r++) {
-        const n = view.getUint32(b.off, endian);
-        b.off += 4;
-        readPoints(view, b, endian, n);
-      }
-      return;
+      // POLYGON: numRings, each ring = numPoints + points
+      const numRings = view.getUint32(c.off, endian);
+      c.off += 4;
+      const rings: number[][][] = [];
+      for (let r = 0; r < numRings; r++) rings.push(readLineString(view, c, endian));
+      return { type: "Polygon", coordinates: rings };
     }
-    case 4: // MULTIPOINT
-    case 5: // MULTILINESTRING
-    case 6: // MULTIPOLYGON
+    case 4: {
+      // MULTIPOINT: each sub-geom has its own WKB header (type 1)
+      const n = view.getUint32(c.off, endian);
+      c.off += 4;
+      const pts: number[][] = [];
+      for (let i = 0; i < n; i++) {
+        const g = readGeom(view, c);
+        if (g.type === "Point") pts.push(g.coordinates as number[]);
+      }
+      return { type: "MultiPoint", coordinates: pts };
+    }
+    case 5: {
+      // MULTILINESTRING
+      const n = view.getUint32(c.off, endian);
+      c.off += 4;
+      const lines: number[][][] = [];
+      for (let i = 0; i < n; i++) {
+        const g = readGeom(view, c);
+        if (g.type === "LineString") lines.push(g.coordinates as number[][]);
+      }
+      return { type: "MultiLineString", coordinates: lines };
+    }
+    case 6: {
+      // MULTIPOLYGON
+      const n = view.getUint32(c.off, endian);
+      c.off += 4;
+      const polys: number[][][][] = [];
+      for (let i = 0; i < n; i++) {
+        const g = readGeom(view, c);
+        if (g.type === "Polygon") polys.push(g.coordinates as number[][][]);
+      }
+      return { type: "MultiPolygon", coordinates: polys };
+    }
     case 7: {
-      // GEOMETRYCOLLECTION — each sub-geom carries its own header
-      const numGeoms = view.getUint32(b.off, endian);
-      b.off += 4;
-      for (let i = 0; i < numGeoms; i++) walkGeom(view, b);
-      return;
+      // GEOMETRYCOLLECTION
+      const n = view.getUint32(c.off, endian);
+      c.off += 4;
+      const geoms: GeoJSON.Geometry[] = [];
+      for (let i = 0; i < n; i++) geoms.push(readGeom(view, c));
+      return { type: "GeometryCollection", geometries: geoms };
     }
     default:
       throw new Error(`Unsupported WKB type: ${type}`);
   }
 }
 
-function readPoints(
+function readPoint(view: DataView, c: Cursor, endian: boolean): [number, number] {
+  const x = view.getFloat64(c.off, endian);
+  c.off += 8;
+  const y = view.getFloat64(c.off, endian);
+  c.off += 8;
+  if (x < c.minX) c.minX = x;
+  if (x > c.maxX) c.maxX = x;
+  if (y < c.minY) c.minY = y;
+  if (y > c.maxY) c.maxY = y;
+  return [x, y];
+}
+
+function readLineString(
   view: DataView,
-  b: BboxCursor,
+  c: Cursor,
   endian: boolean,
-  n: number,
-): void {
-  for (let i = 0; i < n; i++) {
-    const x = view.getFloat64(b.off, endian);
-    b.off += 8;
-    const y = view.getFloat64(b.off, endian);
-    b.off += 8;
-    if (x < b.minX) b.minX = x;
-    if (x > b.maxX) b.maxX = x;
-    if (y < b.minY) b.minY = y;
-    if (y > b.maxY) b.maxY = y;
-  }
+): number[][] {
+  const n = view.getUint32(c.off, endian);
+  c.off += 4;
+  const coords: number[][] = new Array(n);
+  for (let i = 0; i < n; i++) coords[i] = readPoint(view, c, endian);
+  return coords;
 }

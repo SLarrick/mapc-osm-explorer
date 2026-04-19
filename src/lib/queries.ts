@@ -1,12 +1,13 @@
 /**
- * Category queries. Each function returns a FeatureCollection of points
- * ready to render on the map (with tags preserved as properties).
+ * Category queries. Each function returns a FeatureCollection with real
+ * geometries (Point / LineString / Polygon / Multi*) ready to render on
+ * the map, with OSM tags preserved as properties.
  */
 import { runSql } from "./duckdb";
-import { parseWkbBboxCenter } from "./wkb";
+import { parseWkbGeometry } from "./wkb";
 import { getMunicipalityBySlug, pointInArea } from "./geo";
 
-export interface ResultFeature extends GeoJSON.Feature<GeoJSON.Point> {
+export interface ResultFeature extends GeoJSON.Feature<GeoJSON.Geometry> {
   properties: {
     osm_id: number;
     osm_type: string;
@@ -24,18 +25,17 @@ type RawRow = {
 };
 
 /**
- * Finds all OSM features whose `leisure=playground` AND whose geometry
- * falls within the given municipality.
+ * Finds all OSM features with `leisure=playground` whose geometry is
+ * (roughly) within the given municipality.
  *
  * SQL side: pulls candidate rows (only the 1,868 playgrounds in MAPC).
- * JS side: parses WKB into a representative point (bbox center for
- * polygon/line geoms, true coords for nodes), then filters by polygon.
- * Swap to DuckDB-spatial server-side (ST_Within) once we load the
- * extension in v1.5.
+ * JS side: parses WKB into full GeoJSON, filters by bbox-center inside
+ * the muni polygon. Good enough for small features; swap to DuckDB
+ * `ST_Intersects` server-side once we load the spatial extension (v1.5).
  */
 export async function findPlaygroundsInMuni(
   muniSlug: string,
-): Promise<GeoJSON.FeatureCollection<GeoJSON.Point>> {
+): Promise<GeoJSON.FeatureCollection<GeoJSON.Geometry>> {
   const muni = await getMunicipalityBySlug(muniSlug);
   if (!muni) throw new Error(`Unknown municipality slug: ${muniSlug}`);
 
@@ -55,9 +55,9 @@ export async function findPlaygroundsInMuni(
   const muniGeom = muni.geometry as GeoJSON.Polygon | GeoJSON.MultiPolygon;
 
   for (const row of rows) {
-    const lngLat = parseWkbBboxCenter(row.geometry_wkb);
-    if (!lngLat) continue; // malformed WKB — skip
-    if (!pointInArea(lngLat, muniGeom)) continue;
+    const parsed = parseWkbGeometry(row.geometry_wkb);
+    if (!parsed) continue;
+    if (!pointInArea(parsed.center, muniGeom)) continue;
 
     let parsedTags: Record<string, string> = {};
     try {
@@ -68,7 +68,7 @@ export async function findPlaygroundsInMuni(
 
     features.push({
       type: "Feature",
-      geometry: { type: "Point", coordinates: [lngLat[0], lngLat[1]] },
+      geometry: parsed.geometry,
       properties: {
         osm_id: Number(row.osm_id),
         osm_type: row.osm_type,

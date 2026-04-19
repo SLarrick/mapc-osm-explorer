@@ -4,7 +4,7 @@ import { findPlaygroundsInMuni } from "./lib/queries";
 
 function App() {
   const [results, setResults] = useState<
-    GeoJSON.FeatureCollection<GeoJSON.Point> | null
+    GeoJSON.FeatureCollection<GeoJSON.Geometry> | null
   >(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);

@@ -1,7 +1,6 @@
 import { useEffect, useRef } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { bboxOfPoints } from "../lib/geo";
 
 /**
  * Base map centered on MAPC region.
@@ -10,7 +9,8 @@ import { bboxOfPoints } from "../lib/geo";
  *   - Light vector base from OpenFreeMap Positron (no API key required)
  *   - MAPC outer boundary as a thick soft outline
  *   - Municipality polygons with hover highlight
- *   - Optional query-results layer (points) supplied via props
+ *   - Optional query-results overlay (mixed Point/Line/Polygon) with a
+ *     hover tooltip showing feature name
  */
 const BASE_STYLE = "https://tiles.openfreemap.org/styles/positron";
 
@@ -19,15 +19,23 @@ const INITIAL_CENTER: [number, number] = [-71.06, 42.36];
 const INITIAL_ZOOM = 8.4;
 
 interface MapViewProps {
-  /** Optional overlay of query-result points. When it changes, the map
-   *  rerenders the `results` source and fits to its bbox. */
-  results?: GeoJSON.FeatureCollection<GeoJSON.Point> | null;
+  /** Optional overlay of query-result features. When it changes, the map
+   *  rerenders the `results-data` source and fits to its bbox. */
+  results?: GeoJSON.FeatureCollection<GeoJSON.Geometry> | null;
 }
+
+// Layer ids we hit-test for the hover tooltip
+const RESULT_LAYER_IDS = [
+  "results-fill",
+  "results-line",
+  "results-circle",
+];
 
 export function MapView({ results }: MapViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const mapReadyRef = useRef(false);
+  const popupRef = useRef<maplibregl.Popup | null>(null);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -42,6 +50,16 @@ export function MapView({ results }: MapViewProps) {
 
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
     mapRef.current = map;
+
+    // Tooltip popup, created lazily. closeOnClick: false so it doesn't fight
+    // with future click-to-select; closeButton: false because it auto-hides.
+    const popup = new maplibregl.Popup({
+      closeButton: false,
+      closeOnClick: false,
+      offset: 10,
+      className: "results-popup",
+    });
+    popupRef.current = popup;
 
     map.on("load", async () => {
       // Load boundary geojsons
@@ -103,12 +121,10 @@ export function MapView({ results }: MapViewProps) {
         },
       });
 
-      // Hover interaction
+      // Muni hover highlight
       let hoveredId: string | number | null = null;
-
       map.on("mousemove", "munis-fill", (e) => {
         if (!e.features?.length) return;
-        map.getCanvas().style.cursor = "pointer";
         const id = e.features[0].id as string | number | undefined;
         if (hoveredId !== null && hoveredId !== id) {
           map.setFeatureState(
@@ -118,15 +134,10 @@ export function MapView({ results }: MapViewProps) {
         }
         if (id !== undefined) {
           hoveredId = id;
-          map.setFeatureState(
-            { source: "mapc-munis", id },
-            { hover: true },
-          );
+          map.setFeatureState({ source: "mapc-munis", id }, { hover: true });
         }
       });
-
       map.on("mouseleave", "munis-fill", () => {
-        map.getCanvas().style.cursor = "";
         if (hoveredId !== null) {
           map.setFeatureState(
             { source: "mapc-munis", id: hoveredId },
@@ -138,24 +149,23 @@ export function MapView({ results }: MapViewProps) {
 
       // Fit to MAPC boundary extent with a touch of padding
       try {
-        const bbox = turfBbox(boundary);
-        map.fitBounds(bbox as [number, number, number, number], {
-          padding: 24,
-          duration: 0,
-        });
+        const bbox = boundsOfFeatureCollection(boundary);
+        if (bbox)
+          map.fitBounds(bbox, { padding: 24, duration: 0 });
       } catch {
         /* fallback to initial center/zoom */
       }
 
       mapReadyRef.current = true;
       // If results arrived before map finished loading, render them now
-      if (resultsRef.current) renderResults(map, resultsRef.current);
+      if (resultsRef.current) renderResults(map, popup, resultsRef.current);
     });
 
     return () => {
       map.remove();
       mapRef.current = null;
       mapReadyRef.current = false;
+      popupRef.current = null;
     };
   }, []);
 
@@ -164,8 +174,9 @@ export function MapView({ results }: MapViewProps) {
   useEffect(() => {
     resultsRef.current = results ?? null;
     const map = mapRef.current;
-    if (!map || !mapReadyRef.current) return;
-    renderResults(map, results ?? null);
+    const popup = popupRef.current;
+    if (!map || !popup || !mapReadyRef.current) return;
+    renderResults(map, popup, results ?? null);
   }, [results]);
 
   return (
@@ -177,75 +188,161 @@ export function MapView({ results }: MapViewProps) {
 }
 
 /**
- * Add or update a `results-points` source + `results-circle` layer. When
- * `results` is null or empty, the source is cleared and the map refits to
- * the MAPC boundary.
+ * Add or update the `results-data` source + its three typed layers
+ * (fill+outline for polygons, line for linestrings, circle+halo for
+ * points). Also wires hover handlers that show a tooltip with the
+ * feature name.
  */
 function renderResults(
   map: maplibregl.Map,
-  results: GeoJSON.FeatureCollection<GeoJSON.Point> | null,
+  popup: maplibregl.Popup,
+  results: GeoJSON.FeatureCollection<GeoJSON.Geometry> | null,
 ): void {
-  const empty: GeoJSON.FeatureCollection<GeoJSON.Point> = {
+  const empty: GeoJSON.FeatureCollection<GeoJSON.Geometry> = {
     type: "FeatureCollection",
     features: [],
   };
   const data = results ?? empty;
 
-  const existing = map.getSource("results-points") as
+  const existing = map.getSource("results-data") as
     | maplibregl.GeoJSONSource
     | undefined;
+
   if (existing) {
     existing.setData(data);
   } else {
-    map.addSource("results-points", { type: "geojson", data });
+    map.addSource("results-data", { type: "geojson", data });
+
+    // Polygon fill (drawn first so outlines/points sit on top)
+    map.addLayer({
+      id: "results-fill",
+      type: "fill",
+      source: "results-data",
+      filter: [
+        "any",
+        ["==", ["geometry-type"], "Polygon"],
+        ["==", ["geometry-type"], "MultiPolygon"],
+      ],
+      paint: {
+        "fill-color": "#0284c7", // sky-600
+        "fill-opacity": 0.25,
+      },
+    });
+
+    // Polygon outlines
+    map.addLayer({
+      id: "results-outline",
+      type: "line",
+      source: "results-data",
+      filter: [
+        "any",
+        ["==", ["geometry-type"], "Polygon"],
+        ["==", ["geometry-type"], "MultiPolygon"],
+      ],
+      paint: {
+        "line-color": "#0369a1", // sky-700
+        "line-width": 1.8,
+      },
+    });
+
+    // LineString features (future-proof for streets / trails)
+    map.addLayer({
+      id: "results-line",
+      type: "line",
+      source: "results-data",
+      filter: [
+        "any",
+        ["==", ["geometry-type"], "LineString"],
+        ["==", ["geometry-type"], "MultiLineString"],
+      ],
+      paint: {
+        "line-color": "#0369a1",
+        "line-width": 2.4,
+      },
+    });
+
+    // Point halo + core
     map.addLayer({
       id: "results-halo",
       type: "circle",
-      source: "results-points",
+      source: "results-data",
+      filter: ["==", ["geometry-type"], "Point"],
       paint: {
         "circle-radius": 10,
-        "circle-color": "#0ea5e9", // sky-500
+        "circle-color": "#0ea5e9",
         "circle-opacity": 0.18,
       },
     });
     map.addLayer({
       id: "results-circle",
       type: "circle",
-      source: "results-points",
+      source: "results-data",
+      filter: ["==", ["geometry-type"], "Point"],
       paint: {
         "circle-radius": 5,
-        "circle-color": "#0284c7", // sky-600
+        "circle-color": "#0284c7",
         "circle-stroke-width": 1.5,
         "circle-stroke-color": "#ffffff",
       },
     });
+
+    // Hover → tooltip. MapLibre doesn't support multi-layer hover in one
+    // handler, so we attach the same logic to each interactive layer.
+    const showTooltip = (e: maplibregl.MapLayerMouseEvent) => {
+      const f = e.features?.[0];
+      if (!f) return;
+      map.getCanvas().style.cursor = "pointer";
+      const props = (f.properties ?? {}) as {
+        name?: string | null;
+        osm_type?: string;
+      };
+      const name =
+        props.name && props.name.trim() !== ""
+          ? escapeHtml(props.name)
+          : "<em class='text-slate-400'>Unnamed playground</em>";
+      const subtitle = props.osm_type
+        ? `<div class='text-xs text-slate-500 mt-0.5'>OSM ${escapeHtml(props.osm_type)}</div>`
+        : "";
+      popup
+        .setLngLat(e.lngLat)
+        .setHTML(
+          `<div class='text-sm font-medium text-slate-800'>${name}</div>${subtitle}`,
+        )
+        .addTo(map);
+    };
+    const hideTooltip = () => {
+      map.getCanvas().style.cursor = "";
+      popup.remove();
+    };
+    for (const id of RESULT_LAYER_IDS) {
+      map.on("mousemove", id, showTooltip);
+      map.on("mouseleave", id, hideTooltip);
+    }
   }
 
   if (data.features.length > 0) {
-    const pts = data.features.map(
-      (f) => f.geometry.coordinates as [number, number],
-    );
-    const bbox = bboxOfPoints(pts);
+    const bbox = boundsOfFeatureCollection(data);
     if (bbox) {
-      map.fitBounds(bbox as [number, number, number, number], {
+      map.fitBounds(bbox, {
         padding: 60,
-        maxZoom: 14,
+        maxZoom: 16,
         duration: 600,
       });
     }
+  } else {
+    popup.remove();
   }
 }
 
-/** Minimal GeoJSON bbox without pulling in turf. Accepts Feature or FeatureCollection. */
-function turfBbox(
-  gj: GeoJSON.Feature | GeoJSON.FeatureCollection,
-): [number, number, number, number] {
+/** Full-coordinate bbox of any FeatureCollection. */
+function boundsOfFeatureCollection(
+  fc: GeoJSON.FeatureCollection | GeoJSON.Feature,
+): [number, number, number, number] | null {
   let minX = Infinity,
     minY = Infinity,
     maxX = -Infinity,
     maxY = -Infinity;
-  const features =
-    gj.type === "FeatureCollection" ? gj.features : [gj];
+  const features = fc.type === "FeatureCollection" ? fc.features : [fc];
   for (const feat of features) {
     walkCoords(feat.geometry, (x, y) => {
       if (x < minX) minX = x;
@@ -254,6 +351,7 @@ function turfBbox(
       if (y > maxY) maxY = y;
     });
   }
+  if (minX === Infinity) return null;
   return [minX, minY, maxX, maxY];
 }
 
@@ -262,6 +360,10 @@ function walkCoords(
   fn: (x: number, y: number) => void,
 ): void {
   if (!geom) return;
+  if (geom.type === "GeometryCollection") {
+    for (const g of geom.geometries) walkCoords(g, fn);
+    return;
+  }
   const recurse = (c: unknown): void => {
     if (Array.isArray(c) && typeof c[0] === "number") {
       fn(c[0] as number, c[1] as number);
@@ -270,4 +372,13 @@ function walkCoords(
     }
   };
   if ("coordinates" in geom) recurse(geom.coordinates);
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
