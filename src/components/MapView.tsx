@@ -8,9 +8,12 @@ import "maplibre-gl/dist/maplibre-gl.css";
  * Renders:
  *   - Light vector base from OpenFreeMap Positron (no API key required)
  *   - MAPC outer boundary as a thick soft outline
- *   - Municipality polygons with hover highlight
- *   - Optional query-results overlay (mixed Point/Line/Polygon) with a
- *     hover tooltip showing feature name
+ *   - Municipality polygons. Pre-selection: blue hover "juice" that nudges
+ *     the user to click a muni. Post-selection: the selected muni has a
+ *     bolder outline and no fill, neighboring munis dim to gray (so the
+ *     selection reads as scoped), and hover on *other* munis is lighter
+ *     (still switchable, not competing with the data overlay).
+ *   - Optional query-results overlay with hover tooltips + click-to-select.
  */
 const BASE_STYLE = "https://tiles.openfreemap.org/styles/positron";
 
@@ -27,6 +30,11 @@ interface MapViewProps {
   /** Called with a feature id on click, or null when the user clicks
    *  empty map space to deselect. */
   onSelectFeature?: (id: string | null) => void;
+  /** Currently-selected municipality slug. When set, drives the
+   *  dim-others / bolder-outline / focused-view treatment. */
+  selectedMuniSlug?: string | null;
+  /** Called when the user clicks a muni polygon on the map. */
+  onSelectMuni?: (slug: string) => void;
 }
 
 // Layer ids we hit-test for the hover tooltip. The circle layer rides the
@@ -44,15 +52,81 @@ const RESULT_LAYER_IDS = [
 const Z_SHAPES_FADE_START = 12.5;
 const Z_SHAPES_FADE_END = 14;
 
-export function MapView({ results, selectedId, onSelectFeature }: MapViewProps) {
+// Paint expressions for the muni-fill layer in the two modes. We swap the
+// whole expression via setPaintProperty when selection state changes.
+const MUNI_FILL_PRESELECTION: {
+  color: maplibregl.ExpressionSpecification;
+  opacity: maplibregl.ExpressionSpecification;
+} = {
+  color: [
+    "case",
+    ["boolean", ["feature-state", "hover"], false],
+    "#0ea5e9", // sky-500 — the blue "juice"
+    "#f1f5f9", // slate-100 — ambient
+  ],
+  opacity: [
+    "case",
+    ["boolean", ["feature-state", "hover"], false],
+    0.25,
+    0.15,
+  ],
+};
+
+function muniFillPostSelection(slug: string): {
+  color: maplibregl.ExpressionSpecification;
+  opacity: maplibregl.ExpressionSpecification;
+} {
+  return {
+    // Selected: transparent (no fill, data can breathe).
+    // Others: slate dim mask; lighter gray on hover (signal: still clickable
+    // to switch) — deliberately NOT blue, to avoid competing with the
+    // selection accent + data colors.
+    color: [
+      "case",
+      ["==", ["get", "slug"], slug],
+      "#ffffff", // value ignored because opacity is 0, but must parse
+      [
+        "case",
+        ["boolean", ["feature-state", "hover"], false],
+        "#94a3b8", // slate-400
+        "#cbd5e1", // slate-300
+      ],
+    ],
+    opacity: [
+      "case",
+      ["==", ["get", "slug"], slug],
+      0,
+      [
+        "case",
+        ["boolean", ["feature-state", "hover"], false],
+        0.35,
+        0.25,
+      ],
+    ],
+  };
+}
+
+export function MapView({
+  results,
+  selectedId,
+  onSelectFeature,
+  selectedMuniSlug,
+  onSelectMuni,
+}: MapViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const mapReadyRef = useRef(false);
   const popupRef = useRef<maplibregl.Popup | null>(null);
-  // Keep latest callback in a ref so the one-shot click handler below
-  // always sees the current closure.
+  const munisFcRef = useRef<GeoJSON.FeatureCollection | null>(null);
+  const boundaryBboxRef = useRef<[number, number, number, number] | null>(null);
+
+  // Keep latest callbacks in refs so the load-time handlers always see
+  // the current closures.
   const onSelectRef = useRef(onSelectFeature);
   onSelectRef.current = onSelectFeature;
+  const onSelectMuniRef = useRef(onSelectMuni);
+  onSelectMuniRef.current = onSelectMuni;
+
   const prevSelectedIdRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -66,11 +140,12 @@ export function MapView({ results, selectedId, onSelectFeature }: MapViewProps) 
       attributionControl: { compact: true },
     });
 
-    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+    map.addControl(
+      new maplibregl.NavigationControl({ showCompass: false }),
+      "top-right",
+    );
     mapRef.current = map;
 
-    // Tooltip popup, created lazily. closeOnClick: false so it doesn't fight
-    // with future click-to-select; closeButton: false because it auto-hides.
     const popup = new maplibregl.Popup({
       closeButton: false,
       closeOnClick: false,
@@ -80,13 +155,14 @@ export function MapView({ results, selectedId, onSelectFeature }: MapViewProps) 
     popupRef.current = popup;
 
     map.on("load", async () => {
-      // Load boundary geojsons
       const [boundaryRes, muniRes] = await Promise.all([
         fetch("/data/mapc-boundary.geojson"),
         fetch("/data/mapc-municipalities.geojson"),
       ]);
       const boundary = await boundaryRes.json();
       const munis = await muniRes.json();
+      munisFcRef.current = munis;
+      boundaryBboxRef.current = boundsOfFeatureCollection(boundary);
 
       map.addSource("mapc-boundary", { type: "geojson", data: boundary });
       map.addSource("mapc-munis", {
@@ -101,22 +177,12 @@ export function MapView({ results, selectedId, onSelectFeature }: MapViewProps) 
         type: "fill",
         source: "mapc-munis",
         paint: {
-          "fill-color": [
-            "case",
-            ["boolean", ["feature-state", "hover"], false],
-            "#0ea5e9", // sky-500
-            "#f1f5f9", // slate-100
-          ],
-          "fill-opacity": [
-            "case",
-            ["boolean", ["feature-state", "hover"], false],
-            0.25,
-            0.15,
-          ],
+          "fill-color": MUNI_FILL_PRESELECTION.color,
+          "fill-opacity": MUNI_FILL_PRESELECTION.opacity,
         },
       });
 
-      // Municipality outlines
+      // Municipality outlines (ambient, thin)
       map.addLayer({
         id: "munis-outline",
         type: "line",
@@ -139,6 +205,20 @@ export function MapView({ results, selectedId, onSelectFeature }: MapViewProps) 
         },
       });
 
+      // Bolder outline just for the SELECTED muni. Driven by a filter that
+      // starts matching nothing and gets updated when a selection comes in.
+      map.addLayer({
+        id: "munis-selected-outline",
+        type: "line",
+        source: "mapc-munis",
+        filter: ["==", ["get", "slug"], "__none__"],
+        paint: {
+          "line-color": "#0f172a", // slate-900
+          "line-width": 3,
+          "line-opacity": 1,
+        },
+      });
+
       // Muni hover highlight
       let hoveredId: string | number | null = null;
       map.on("mousemove", "munis-fill", (e) => {
@@ -153,6 +233,7 @@ export function MapView({ results, selectedId, onSelectFeature }: MapViewProps) 
         if (id !== undefined) {
           hoveredId = id;
           map.setFeatureState({ source: "mapc-munis", id }, { hover: true });
+          map.getCanvas().style.cursor = "pointer";
         }
       });
       map.on("mouseleave", "munis-fill", () => {
@@ -163,47 +244,56 @@ export function MapView({ results, selectedId, onSelectFeature }: MapViewProps) 
           );
           hoveredId = null;
         }
+        map.getCanvas().style.cursor = "";
       });
 
-      // Fit to MAPC boundary extent with a touch of padding
-      try {
-        const bbox = boundsOfFeatureCollection(boundary);
-        if (bbox)
-          map.fitBounds(bbox, { padding: 24, duration: 0 });
-      } catch {
-        /* fallback to initial center/zoom */
-      }
+      // Initial fit: MAPC boundary
+      if (boundaryBboxRef.current)
+        map.fitBounds(boundaryBboxRef.current, { padding: 24, duration: 0 });
 
-      // Click anywhere on the map: either select the topmost result
-      // feature under the cursor, or deselect if we clicked empty space.
+      // Click handler: priority is result feature > muni > empty (deselect).
       map.on("click", (e) => {
-        const features = map.queryRenderedFeatures(e.point, {
+        const resultFeats = map.queryRenderedFeatures(e.point, {
           layers: RESULT_LAYER_IDS.filter((id) =>
             Boolean(map.getLayer(id)),
           ),
         });
-        if (features.length > 0) {
-          const f = features[0];
-          // MapLibre's GeoJSON source coerces non-numeric top-level ids to
-          // 0. We stash the real id in properties.uid (stringified as
-          // "${osm_type}/${osm_id}") and promote it below, but for the
-          // click handler we just read properties.uid directly.
+        if (resultFeats.length > 0) {
+          const f = resultFeats[0];
           const id =
             (f.properties as { uid?: string } | null)?.uid ?? null;
           onSelectRef.current?.(id);
-        } else {
-          onSelectRef.current?.(null);
+          return;
         }
+        const muniFeats = map.queryRenderedFeatures(e.point, {
+          layers: ["munis-fill"],
+        });
+        if (muniFeats.length > 0) {
+          const slug = (
+            muniFeats[0].properties as { slug?: string } | null
+          )?.slug;
+          if (slug) {
+            onSelectMuniRef.current?.(slug);
+            return;
+          }
+        }
+        // Empty space → deselect any currently-highlighted result feature
+        onSelectRef.current?.(null);
       });
 
       mapReadyRef.current = true;
-      // If results arrived before map finished loading, render them now
       if (resultsRef.current) renderResults(map, popup, resultsRef.current);
-      // And re-apply selection if it was set before map was ready
       if (prevSelectedIdRef.current !== selectedIdRef.current) {
         applySelection(map, prevSelectedIdRef.current, selectedIdRef.current);
         prevSelectedIdRef.current = selectedIdRef.current;
       }
+      // Apply initial muni selection, if any
+      applyMuniSelection(
+        map,
+        selectedMuniSlugRef.current,
+        munisFcRef.current,
+        boundaryBboxRef.current,
+      );
     });
 
     return () => {
@@ -238,12 +328,82 @@ export function MapView({ results, selectedId, onSelectFeature }: MapViewProps) 
     prevSelectedIdRef.current = next;
   }, [selectedId]);
 
+  // Sync selectedMuniSlug prop → muni-fill paint swap, filter update, and
+  // camera movement.
+  const selectedMuniSlugRef = useRef<string | null>(selectedMuniSlug ?? null);
+  useEffect(() => {
+    const slug = selectedMuniSlug ?? null;
+    selectedMuniSlugRef.current = slug;
+    const map = mapRef.current;
+    if (!map || !mapReadyRef.current) return;
+    applyMuniSelection(map, slug, munisFcRef.current, boundaryBboxRef.current);
+  }, [selectedMuniSlug]);
+
   return (
     <div
       ref={containerRef}
       className="w-full h-full min-h-[480px] rounded-lg overflow-hidden border border-slate-200 bg-slate-100"
     />
   );
+}
+
+/**
+ * Swap the muni-fill paint between the pre- and post-selection stylings,
+ * update the "selected outline" layer filter, and fly the camera to the
+ * selected muni's bbox (or back to the MAPC extent when deselecting).
+ */
+function applyMuniSelection(
+  map: maplibregl.Map,
+  slug: string | null,
+  munisFc: GeoJSON.FeatureCollection | null,
+  regionBbox: [number, number, number, number] | null,
+): void {
+  if (!map.getLayer("munis-fill")) return;
+
+  if (slug) {
+    const paint = muniFillPostSelection(slug);
+    map.setPaintProperty("munis-fill", "fill-color", paint.color);
+    map.setPaintProperty("munis-fill", "fill-opacity", paint.opacity);
+    map.setFilter("munis-selected-outline", ["==", ["get", "slug"], slug]);
+    // Fly to the selected muni bbox
+    if (munisFc) {
+      const feat = munisFc.features.find(
+        (f) => (f.properties as { slug?: string } | null)?.slug === slug,
+      );
+      if (feat) {
+        const bbox = boundsOfFeatureCollection(feat);
+        if (bbox)
+          map.fitBounds(bbox, {
+            padding: 40,
+            duration: 600,
+            maxZoom: 14,
+          });
+      }
+    }
+  } else {
+    map.setPaintProperty(
+      "munis-fill",
+      "fill-color",
+      MUNI_FILL_PRESELECTION.color,
+    );
+    map.setPaintProperty(
+      "munis-fill",
+      "fill-opacity",
+      MUNI_FILL_PRESELECTION.opacity,
+    );
+    map.setFilter("munis-selected-outline", [
+      "==",
+      ["get", "slug"],
+      "__none__",
+    ]);
+    // Zoom back out to the MAPC region so the landing-mode map matches
+    // the initial view.
+    if (regionBbox)
+      map.fitBounds(regionBbox, {
+        padding: 24,
+        duration: 600,
+      });
+  }
 }
 
 /**
@@ -293,9 +453,7 @@ function renderResults(
     // MapLibre forbids putting `["zoom"]` inside anything other than a
     // top-level `interpolate`/`step`. So selection-aware + zoom-driven
     // paint has to live as interpolate-at-top with a `case` inside each
-    // stop value. This helper builds that shape:
-    //   interpolate(["zoom"], z1, case(selected, selVal, unsVal1),
-    //                        z2, case(selected, selVal, unsVal2), ...)
+    // stop value.
     const zoomSel = (
       stops: Array<[number, number, number]>, // [zoom, unselected, selected]
     ): maplibregl.ExpressionSpecification => {
@@ -346,8 +504,6 @@ function renderResults(
       filter: ["==", ["geometry-type"], "Polygon"],
       paint: {
         "fill-color": FILL_COLOR,
-        // Unselected: fade 0 → 0.3 across the zoom threshold.
-        // Selected: flat 0.5 at both stops so it stays bright always.
         "fill-opacity": zoomSel([
           [Z_SHAPES_FADE_START, 0, 0.5],
           [Z_SHAPES_FADE_END, 0.3, 0.5],
@@ -374,7 +530,7 @@ function renderResults(
       },
     });
 
-    // LineString features (future-proof for streets / trails)
+    // LineString features (streets, trails, paths)
     map.addLayer({
       id: "results-line",
       type: "line",
@@ -383,11 +539,11 @@ function renderResults(
       paint: {
         "line-color": STROKE_COLOR,
         "line-width": zoomSel([
-          [Z_SHAPES_FADE_START, 0, 3.2],
-          [Z_SHAPES_FADE_END, 2.4, 3.2],
+          [Z_SHAPES_FADE_START, 2, 3.5],
+          [Z_SHAPES_FADE_END, 3, 4.5],
         ]),
         "line-opacity": zoomSel([
-          [Z_SHAPES_FADE_START, 0, 1],
+          [Z_SHAPES_FADE_START, 0.85, 1],
           [Z_SHAPES_FADE_END, 1, 1],
         ]),
       },
@@ -436,8 +592,7 @@ function renderResults(
       },
     });
 
-    // Hover → tooltip. MapLibre doesn't support multi-layer hover in one
-    // handler, so we attach the same logic to each interactive layer.
+    // Hover → tooltip
     const showTooltip = (e: maplibregl.MapLayerMouseEvent) => {
       const f = e.features?.[0];
       if (!f) return;
@@ -449,7 +604,7 @@ function renderResults(
       const name =
         props.name && props.name.trim() !== ""
           ? escapeHtml(props.name)
-          : "<em class='text-slate-400'>Unnamed playground</em>";
+          : "<em class='text-slate-400'>Unnamed feature</em>";
       const subtitle = props.osm_type
         ? `<div class='text-xs text-slate-500 mt-0.5'>OSM ${escapeHtml(props.osm_type)}</div>`
         : "";

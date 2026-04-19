@@ -6,6 +6,11 @@
 import { runSql } from "./duckdb";
 import { parseWkbGeometry } from "./wkb";
 import { getMunicipalityBySlug, pointInArea } from "./geo";
+import {
+  filterToSql,
+  getSubtypeBySlug,
+  type Subtype,
+} from "./taxonomy";
 
 export interface ResultFeature extends GeoJSON.Feature<GeoJSON.Geometry> {
   /** Stable per-feature id: "${osm_type}/${osm_id}" (e.g. "way/12345"). Used
@@ -31,30 +36,39 @@ type RawRow = {
 };
 
 /**
- * Finds all OSM features with `leisure=playground` whose geometry is
- * (roughly) within the given municipality.
- *
- * SQL side: pulls candidate rows (only the 1,868 playgrounds in MAPC).
- * JS side: parses WKB into full GeoJSON, filters by bbox-center inside
- * the muni polygon. Good enough for small features; swap to DuckDB
- * `ST_Intersects` server-side once we load the spatial extension (v1.5).
+ * Find all OSM features matching a curated subtype ("playgrounds",
+ * "libraries", …) inside a municipality, using bbox-centroid as a cheap
+ * point-in-polygon proxy. Good enough for most small features; we'll
+ * swap in DuckDB ST_Intersects when we pull in the spatial extension.
  */
-export async function findPlaygroundsInMuni(
+export async function findFeaturesInMuni(
+  subtypeSlug: string,
+  muniSlug: string,
+): Promise<GeoJSON.FeatureCollection<GeoJSON.Geometry>> {
+  const subtype = getSubtypeBySlug(subtypeSlug);
+  if (!subtype) throw new Error(`Unknown feature type: ${subtypeSlug}`);
+  return findFeaturesInMuniBy(subtype, muniSlug);
+}
+
+async function findFeaturesInMuniBy(
+  subtype: Subtype,
   muniSlug: string,
 ): Promise<GeoJSON.FeatureCollection<GeoJSON.Geometry>> {
   const muni = await getMunicipalityBySlug(muniSlug);
   if (!muni) throw new Error(`Unknown municipality slug: ${muniSlug}`);
 
-  // Parquet URL — always same-origin, served by Vercel with range support
+  // Parquet URL — always same-origin, served by Vercel with range support.
+  // The category slug names the file per _manifest.json.
   const parquetUrl = new URL(
-    "/data/parks-and-recreation.parquet",
+    `/data/${subtype.categorySlug}.parquet`,
     window.location.origin,
   ).toString();
 
+  const where = filterToSql(subtype.filter);
   const rows = await runSql<RawRow>(`
     SELECT osm_id, osm_type, name, CAST(tags AS VARCHAR) AS tags, geometry_wkb
     FROM '${parquetUrl}'
-    WHERE json_extract_string(tags, '$.leisure') = 'playground'
+    WHERE ${where}
   `);
 
   const features: ResultFeature[] = [];
@@ -89,4 +103,11 @@ export async function findPlaygroundsInMuni(
   }
 
   return { type: "FeatureCollection", features };
+}
+
+/** Back-compat shim used by old tests / call sites from Slice 1. */
+export async function findPlaygroundsInMuni(
+  muniSlug: string,
+): Promise<GeoJSON.FeatureCollection<GeoJSON.Geometry>> {
+  return findFeaturesInMuni("playgrounds", muniSlug);
 }

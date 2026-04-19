@@ -102,3 +102,31 @@ export async function getMunicipalityBySlug(
     return null;
   return feat as GeoJSON.Feature<AreaLike>;
 }
+
+export interface MuniSummary {
+  slug: string;
+  name: string;
+  /** MAPC sub-region grouping (e.g. "North Shore") — used for optgroups. */
+  subregion: string | null;
+}
+
+/** List of all 101 MAPC munis, alphabetical. Used to populate the dropdown. */
+export async function listMunicipalities(): Promise<MuniSummary[]> {
+  const fc = await loadMunis();
+  const out: MuniSummary[] = [];
+  for (const f of fc.features) {
+    const p = (f.properties ?? {}) as {
+      slug?: string;
+      name?: string;
+      mapc_subregion?: string | null;
+    };
+    if (!p.slug || !p.name) continue;
+    out.push({
+      slug: p.slug,
+      name: p.name,
+      subregion: p.mapc_subregion ?? null,
+    });
+  }
+  out.sort((a, b) => a.name.localeCompare(b.name));
+  return out;
+}
