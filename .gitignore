@@ -23,3 +23,6 @@ dist-ssr
 *.sln
 *.sw?
 __pycache__/
+
+# Claude Code local dev helpers
+.claude/

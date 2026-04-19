@@ -184,10 +184,12 @@ export function MapView({ results, selectedId, onSelectFeature }: MapViewProps) 
         });
         if (features.length > 0) {
           const f = features[0];
+          // MapLibre's GeoJSON source coerces non-numeric top-level ids to
+          // 0. We stash the real id in properties.uid (stringified as
+          // "${osm_type}/${osm_id}") and promote it below, but for the
+          // click handler we just read properties.uid directly.
           const id =
-            (typeof f.id === "string" || typeof f.id === "number"
-              ? String(f.id)
-              : (f.properties as { uid?: string } | null)?.uid) ?? null;
+            (f.properties as { uid?: string } | null)?.uid ?? null;
           onSelectRef.current?.(id);
         } else {
           onSelectRef.current?.(null);
@@ -274,34 +276,43 @@ function renderResults(
       | undefined;
     existingCentroids?.setData(centroids);
   } else {
-    map.addSource("results-data", { type: "geojson", data });
-    map.addSource("results-centroids", { type: "geojson", data: centroids });
+    // promoteId: "uid" — tell MapLibre to use properties.uid as the
+    // feature id. Without this, our string ids like "way/123" get coerced
+    // to 0 and setFeatureState / feature-state lookups all collide.
+    map.addSource("results-data", {
+      type: "geojson",
+      data,
+      promoteId: "uid",
+    });
+    map.addSource("results-centroids", {
+      type: "geojson",
+      data: centroids,
+      promoteId: "uid",
+    });
 
-    // Shared zoom expressions. Polygons/lines fade in as you zoom past
-    // the muni-scale threshold; circles shrink + fade so they act as
-    // gentle anchor dots at high zoom rather than competing with shapes.
-    const fadeInOpacity = (peak: number) =>
-      [
-        "interpolate",
-        ["linear"],
-        ["zoom"],
-        Z_SHAPES_FADE_START,
-        0,
-        Z_SHAPES_FADE_END,
-        peak,
-      ] as maplibregl.ExpressionSpecification;
-    const fadeInWidth = (peak: number) =>
-      [
-        "interpolate",
-        ["linear"],
-        ["zoom"],
-        Z_SHAPES_FADE_START,
-        0,
-        Z_SHAPES_FADE_END,
-        peak,
-      ] as maplibregl.ExpressionSpecification;
+    // MapLibre forbids putting `["zoom"]` inside anything other than a
+    // top-level `interpolate`/`step`. So selection-aware + zoom-driven
+    // paint has to live as interpolate-at-top with a `case` inside each
+    // stop value. This helper builds that shape:
+    //   interpolate(["zoom"], z1, case(selected, selVal, unsVal1),
+    //                        z2, case(selected, selVal, unsVal2), ...)
+    const zoomSel = (
+      stops: Array<[number, number, number]>, // [zoom, unselected, selected]
+    ): maplibregl.ExpressionSpecification => {
+      const expr: unknown[] = ["interpolate", ["linear"], ["zoom"]];
+      for (const [z, uns, sel] of stops) {
+        expr.push(z);
+        expr.push([
+          "case",
+          ["boolean", ["feature-state", "selected"], false],
+          sel,
+          uns,
+        ]);
+      }
+      return expr as maplibregl.ExpressionSpecification;
+    };
 
-    // Colors — amber for selected, sky for unselected.
+    // Pure selection (no zoom) — plain `case` is fine.
     const FILL_COLOR: maplibregl.ExpressionSpecification = [
       "case",
       ["boolean", ["feature-state", "selected"], false],
@@ -314,6 +325,18 @@ function renderResults(
       "#b45309", // amber-700
       "#0369a1", // sky-700
     ];
+    const CIRCLE_COLOR_HALO: maplibregl.ExpressionSpecification = [
+      "case",
+      ["boolean", ["feature-state", "selected"], false],
+      "#f59e0b",
+      "#0ea5e9", // sky-500
+    ];
+    const CIRCLE_COLOR_DOT: maplibregl.ExpressionSpecification = [
+      "case",
+      ["boolean", ["feature-state", "selected"], false],
+      "#f59e0b",
+      "#0284c7", // sky-600
+    ];
 
     // Polygon fill
     map.addLayer({
@@ -323,14 +346,12 @@ function renderResults(
       filter: ["==", ["geometry-type"], "Polygon"],
       paint: {
         "fill-color": FILL_COLOR,
-        // Selected features stay bright at all zooms. Unselected use the
-        // zoom-driven fade.
-        "fill-opacity": [
-          "case",
-          ["boolean", ["feature-state", "selected"], false],
-          0.5,
-          fadeInOpacity(0.3),
-        ],
+        // Unselected: fade 0 → 0.3 across the zoom threshold.
+        // Selected: flat 0.5 at both stops so it stays bright always.
+        "fill-opacity": zoomSel([
+          [Z_SHAPES_FADE_START, 0, 0.5],
+          [Z_SHAPES_FADE_END, 0.3, 0.5],
+        ]),
       },
     });
 
@@ -342,18 +363,14 @@ function renderResults(
       filter: ["==", ["geometry-type"], "Polygon"],
       paint: {
         "line-color": STROKE_COLOR,
-        "line-width": [
-          "case",
-          ["boolean", ["feature-state", "selected"], false],
-          2.5,
-          fadeInWidth(1.8),
-        ],
-        "line-opacity": [
-          "case",
-          ["boolean", ["feature-state", "selected"], false],
-          1,
-          fadeInOpacity(1),
-        ],
+        "line-width": zoomSel([
+          [Z_SHAPES_FADE_START, 0, 2.5],
+          [Z_SHAPES_FADE_END, 1.8, 2.5],
+        ]),
+        "line-opacity": zoomSel([
+          [Z_SHAPES_FADE_START, 0, 1],
+          [Z_SHAPES_FADE_END, 1, 1],
+        ]),
       },
     });
 
@@ -365,18 +382,14 @@ function renderResults(
       filter: ["==", ["geometry-type"], "LineString"],
       paint: {
         "line-color": STROKE_COLOR,
-        "line-width": [
-          "case",
-          ["boolean", ["feature-state", "selected"], false],
-          3.2,
-          fadeInWidth(2.4),
-        ],
-        "line-opacity": [
-          "case",
-          ["boolean", ["feature-state", "selected"], false],
-          1,
-          fadeInOpacity(1),
-        ],
+        "line-width": zoomSel([
+          [Z_SHAPES_FADE_START, 0, 3.2],
+          [Z_SHAPES_FADE_END, 2.4, 3.2],
+        ]),
+        "line-opacity": zoomSel([
+          [Z_SHAPES_FADE_START, 0, 1],
+          [Z_SHAPES_FADE_END, 1, 1],
+        ]),
       },
     });
 
@@ -387,37 +400,16 @@ function renderResults(
       type: "circle",
       source: "results-centroids",
       paint: {
-        "circle-radius": [
-          "case",
-          ["boolean", ["feature-state", "selected"], false],
-          14,
-          [
-            "interpolate",
-            ["linear"],
-            ["zoom"],
-            10, 8,
-            13, 10,
-            16, 6,
-          ],
-        ],
-        "circle-color": [
-          "case",
-          ["boolean", ["feature-state", "selected"], false],
-          "#f59e0b", // amber-500
-          "#0ea5e9", // sky-500
-        ],
-        "circle-opacity": [
-          "case",
-          ["boolean", ["feature-state", "selected"], false],
-          0.35,
-          [
-            "interpolate",
-            ["linear"],
-            ["zoom"],
-            12, 0.18,
-            15, 0,
-          ],
-        ],
+        "circle-radius": zoomSel([
+          [10, 8, 14],
+          [13, 10, 14],
+          [16, 6, 14],
+        ]),
+        "circle-color": CIRCLE_COLOR_HALO,
+        "circle-opacity": zoomSel([
+          [12, 0.18, 0.35],
+          [15, 0, 0.35],
+        ]),
       },
     });
     map.addLayer({
@@ -425,51 +417,22 @@ function renderResults(
       type: "circle",
       source: "results-centroids",
       paint: {
-        "circle-radius": [
-          "case",
-          ["boolean", ["feature-state", "selected"], false],
-          7,
-          [
-            "interpolate",
-            ["linear"],
-            ["zoom"],
-            10, 4.5,
-            13, 5,
-            16, 3.5,
-          ],
-        ],
-        "circle-color": [
-          "case",
-          ["boolean", ["feature-state", "selected"], false],
-          "#f59e0b", // amber-500
-          "#0284c7", // sky-600
-        ],
+        "circle-radius": zoomSel([
+          [10, 4.5, 7],
+          [13, 5, 7],
+          [16, 3.5, 7],
+        ]),
+        "circle-color": CIRCLE_COLOR_DOT,
         "circle-stroke-width": 1.5,
         "circle-stroke-color": "#ffffff",
-        "circle-opacity": [
-          "case",
-          ["boolean", ["feature-state", "selected"], false],
-          1,
-          [
-            "interpolate",
-            ["linear"],
-            ["zoom"],
-            13, 1,
-            16, 0.6,
-          ],
-        ],
-        "circle-stroke-opacity": [
-          "case",
-          ["boolean", ["feature-state", "selected"], false],
-          1,
-          [
-            "interpolate",
-            ["linear"],
-            ["zoom"],
-            13, 1,
-            16, 0.6,
-          ],
-        ],
+        "circle-opacity": zoomSel([
+          [13, 1, 1],
+          [16, 0.6, 1],
+        ]),
+        "circle-stroke-opacity": zoomSel([
+          [13, 1, 1],
+          [16, 0.6, 1],
+        ]),
       },
     });
 
