@@ -134,9 +134,12 @@ export const SUBTYPES: Subtype[] = [
     completeness: "high",
   },
   {
+    // Libraries live in the community-facilities parquet, not civic-and-government
+    // (confirmed by ETL audit 2026-04: civic has 0 amenity=library rows, community
+    // has 423). Slug kept as "libraries" for URL stability.
     slug: "libraries",
     label: "Libraries",
-    categorySlug: "civic-and-government",
+    categorySlug: "community-facilities",
     filter: { kind: "eq", key: "amenity", values: ["library"] },
     completeness: "high",
   },
@@ -240,13 +243,10 @@ export const SUBTYPES: Subtype[] = [
     filter: { kind: "eq", key: "amenity", values: ["bicycle_parking"] },
     completeness: "spotty",
   },
-  {
-    slug: "street-trees",
-    label: "Street trees",
-    categorySlug: "streetscape",
-    filter: { kind: "eq", key: "natural", values: ["tree"] },
-    completeness: "spotty",
-  },
+  // "street-trees" removed: the OSM tag `natural=tree` covers *all* mapped
+  // trees (not specifically street trees), and those 34k features live in
+  // the natural-features parquet, not streetscape. Re-surfaced as "Trees"
+  // under Natural Features below. See ETL audit 2026-04.
 
   // Natural Features & Green Infrastructure
   {
@@ -269,6 +269,17 @@ export const SUBTYPES: Subtype[] = [
     categorySlug: "natural-features-and-green-infrastructure",
     filter: { kind: "eq", key: "natural", values: ["wetland"] },
     completeness: "high",
+  },
+  {
+    // OSM `natural=tree` — any individually-mapped tree, which in MAPC
+    // skews heavily to a few munis where volunteer tree-mapping happened
+    // (Cambridge, Somerville). Honest framing is "where tree-mapping has
+    // happened," not "where trees are" — hence tier-3 completeness.
+    slug: "trees",
+    label: "Trees",
+    categorySlug: "natural-features-and-green-infrastructure",
+    filter: { kind: "eq", key: "natural", values: ["tree"] },
+    completeness: "spotty",
   },
 
   // Streets & Roadways
@@ -325,13 +336,11 @@ export const SUBTYPES: Subtype[] = [
     filter: { kind: "present", key: "building" },
     completeness: "high",
   },
-  {
-    slug: "addresses",
-    label: "Addresses",
-    categorySlug: "buildings-and-addresses",
-    filter: { kind: "present", key: "addr:housenumber" },
-    completeness: "high",
-  },
+  // "addresses" removed: `addr:housenumber` is a data-completeness artifact,
+  // not a feature type. Addresses are an attribute of other features (mostly
+  // buildings). The MassGIS import gives us ~780k rows — meaningful as a
+  // *coverage check*, not as a "show me a thing" answer. If we surface it
+  // later, it'll be a quality-of-data view, not a feature subtype.
 ];
 
 export function getSubtypeBySlug(slug: string): Subtype | null {

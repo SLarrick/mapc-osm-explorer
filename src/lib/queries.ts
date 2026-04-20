@@ -113,26 +113,50 @@ export async function findPlaygroundsInMuni(
 }
 
 /**
- * Region-wide query result. Includes the total feature count (before the
- * render cap) so the UI can honestly report "showing N of M" when the cap
- * kicks in.
+ * Region-wide query result. Includes the total feature count (the thing
+ * we are most sure of) alongside an optional feature collection for map
+ * render.
+ *
+ * The two-tier model:
+ *   - `totalCount` is always real. `fc` is non-empty only when the total is
+ *     small enough to be meaningful as a point map.
+ *   - When `renderable` is false, we skipped the feature fetch entirely
+ *     (saves bandwidth + DuckDB work) and the UI should lean into the
+ *     count as the primary answer.
+ *
+ * This matches the design principle in PRD §9: descriptive counts are
+ * cheap and trustworthy; rendered points are a richer but rougher artifact
+ * that shouldn't be shown when they'd mislead.
  */
 export interface RegionResult {
   fc: GeoJSON.FeatureCollection<GeoJSON.Geometry>;
-  /** Total rows the SQL filter matched, pre-cap. */
+  /** Total rows the SQL filter matched. Always accurate. */
   totalCount: number;
-  /** True when totalCount > cap and we're only rendering a subset. */
+  /** True when we fetched features (and maybe hit the cap). When false, we
+   *  skipped the feature query because totalCount was above the render
+   *  threshold — show count-only UI. */
+  renderable: boolean;
+  /** True when totalCount > cap and the fetched features are a subset.
+   *  Only meaningful when renderable is true. */
   truncated: boolean;
-  /** Render cap used for this call. */
+  /** Render cap used if the feature query ran. */
   cap: number;
 }
 
 /**
- * Default render cap for region-wide queries. Tuned for MapLibre rendering
- * headroom, not for DuckDB's query cost (which can handle much more).
- * When we add muni-choropleth / hex-density rendering in Slice 4, high-N
- * feature types will go through an aggregation path instead of hitting
- * this cap.
+ * Maximum total count at which we'll render the raw geometries on the
+ * map. Above this, a point map is too dense to be informative at MAPC-
+ * region zoom — Somerville + Cambridge become a blob — so we show the
+ * count only and point the user at a muni for the map view. Slice 4A
+ * (muni-choropleth) and 4B (hex density) will replace this hard cutoff
+ * with real aggregated renders for high-N features.
+ */
+export const REGION_RENDER_THRESHOLD = 2000;
+
+/**
+ * Per-call cap on the number of features fetched when we *do* render.
+ * Set well above REGION_RENDER_THRESHOLD so it only kicks in for edge
+ * cases; the threshold is the primary gate.
  */
 export const REGION_RENDER_CAP = 5000;
 
@@ -141,14 +165,20 @@ export const REGION_RENDER_CAP = 5000;
  * MAPC region. No point-in-polygon filter — the parquet itself is clipped
  * to MAPC at ETL time, so every row is already "in region."
  *
- * We cap the render payload at `cap` (default 5000) to keep MapLibre
- * responsive; the true total is returned separately so the UI can say
- * "Showing 5,000 of 34,812." We also log the ratio to the console so we
- * collect real numbers to drive Slice 4 rendering decisions.
+ * Two-phase:
+ *   1. Always run COUNT(*). Cheap, precise, and the only honest answer
+ *      when N is huge (1M buildings).
+ *   2. Fetch geometries (up to `cap`) only if totalCount ≤ `threshold`.
+ *      Above the threshold, a raw point map at MAPC zoom is noise, not
+ *      signal, so we short-circuit and let the UI say "there are X, pick
+ *      a muni to see them."
+ *
+ * We also log the ratio so Slice 4 has real numbers for every subtype.
  */
 export async function findFeaturesInRegion(
   subtypeSlug: string,
   cap: number = REGION_RENDER_CAP,
+  threshold: number = REGION_RENDER_THRESHOLD,
 ): Promise<RegionResult> {
   const subtype = getSubtypeBySlug(subtypeSlug);
   if (!subtype) throw new Error(`Unknown feature type: ${subtypeSlug}`);
@@ -160,26 +190,39 @@ export async function findFeaturesInRegion(
 
   const where = filterToSql(subtype.filter);
 
-  // Two queries: one for the true total, one for the capped rows.
-  // DuckDB's lazy parquet reads make the COUNT(*) almost free — it only
-  // touches the column(s) referenced in the filter via predicate
-  // pushdown. The cost difference vs. a single query is negligible and
-  // the honesty win (accurate "N of M" messaging) is worth it.
-  const [countRows, rows] = await Promise.all([
-    runSql<{ n: bigint | number }>(`
-      SELECT COUNT(*) AS n
-      FROM '${parquetUrl}'
-      WHERE ${where}
-    `),
-    runSql<RawRow>(`
-      SELECT osm_id, osm_type, name, CAST(tags AS VARCHAR) AS tags, geometry_wkb
-      FROM '${parquetUrl}'
-      WHERE ${where}
-      LIMIT ${cap}
-    `),
-  ]);
-
+  // Phase 1: count only. DuckDB's predicate pushdown makes this almost
+  // free — it only touches the column(s) referenced in the filter.
+  const countRows = await runSql<{ n: bigint | number }>(`
+    SELECT COUNT(*) AS n
+    FROM '${parquetUrl}'
+    WHERE ${where}
+  `);
   const totalCount = Number(countRows[0]?.n ?? 0);
+
+  // Count above the render threshold — skip phase 2 entirely. This saves
+  // both bandwidth (no WKB payload) and render time (no GeoJSON source
+  // update). The UI will lean on the count alone.
+  if (totalCount > threshold) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `[region-query] ${subtypeSlug}: ${totalCount} features — above render threshold (${threshold}), skipping geometry fetch`,
+    );
+    return {
+      fc: { type: "FeatureCollection", features: [] },
+      totalCount,
+      renderable: false,
+      truncated: false,
+      cap,
+    };
+  }
+
+  // Phase 2: fetch capped rows and parse geometries.
+  const rows = await runSql<RawRow>(`
+    SELECT osm_id, osm_type, name, CAST(tags AS VARCHAR) AS tags, geometry_wkb
+    FROM '${parquetUrl}'
+    WHERE ${where}
+    LIMIT ${cap}
+  `);
   const truncated = totalCount > cap;
 
   const features: ResultFeature[] = [];
@@ -221,6 +264,7 @@ export async function findFeaturesInRegion(
   return {
     fc: { type: "FeatureCollection", features },
     totalCount,
+    renderable: true,
     truncated,
     cap,
   };

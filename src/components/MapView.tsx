@@ -530,7 +530,11 @@ function renderResults(
       },
     });
 
-    // LineString features (streets, trails, paths)
+    // LineString features (streets, trails, paths). Visible at every zoom —
+    // the line *is* the feature's visual identity, and we suppress the
+    // usual centroid pin so the line has the stage to itself (see
+    // centroidsOf). Width steps up slightly at neighborhood zooms, and
+    // selected features get a thicker + warmer stroke.
     map.addLayer({
       id: "results-line",
       type: "line",
@@ -539,11 +543,12 @@ function renderResults(
       paint: {
         "line-color": STROKE_COLOR,
         "line-width": zoomSel([
-          [Z_SHAPES_FADE_START, 2, 3.5],
+          [8, 1.8, 3],
+          [Z_SHAPES_FADE_START, 2.2, 3.5],
           [Z_SHAPES_FADE_END, 3, 4.5],
         ]),
         "line-opacity": zoomSel([
-          [Z_SHAPES_FADE_START, 0.85, 1],
+          [8, 0.85, 1],
           [Z_SHAPES_FADE_END, 1, 1],
         ]),
       },
@@ -703,12 +708,20 @@ function walkCoords(
  * Project each feature to a Point at the bbox-center of its geometry,
  * preserving properties. Native Point features are passed through
  * unchanged. Used to drive the always-on "anchor pin" circle layers.
+ *
+ * LineString / MultiLineString features are deliberately excluded: the
+ * line itself is the feature's visual identity (a bike path, a street),
+ * and stamping a centroid dot on top just reads as "dots along a line"
+ * rather than "a line." Lines draw through the `results-line` layer at
+ * all zooms, with width tuned to stay visible at regional zoom.
  */
 function centroidsOf(
   fc: GeoJSON.FeatureCollection<GeoJSON.Geometry>,
 ): GeoJSON.FeatureCollection<GeoJSON.Point> {
   const out: GeoJSON.Feature<GeoJSON.Point>[] = [];
   for (const f of fc.features) {
+    const t = f.geometry?.type;
+    if (t === "LineString" || t === "MultiLineString") continue;
     const center = bboxCenter(f.geometry);
     if (!center) continue;
     out.push({

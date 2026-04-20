@@ -37,9 +37,15 @@ interface ManifestCategory {
   label: string;
 }
 
-/** Metadata about a region query — used to drive the "N of M" / truncation UI. */
+/**
+ * Metadata about a region query. `renderable` is the primary gate: when
+ * false, the total count was above our render threshold (too many to
+ * make a useful point map) and we skipped the feature fetch entirely.
+ * The UI leans on `total` alone in that case.
+ */
 interface RegionMeta {
   total: number;
+  renderable: boolean;
   truncated: boolean;
   cap: number;
 }
@@ -112,6 +118,7 @@ function App() {
         setResults(res.fc);
         setRegionMeta({
           total: res.totalCount,
+          renderable: res.renderable,
           truncated: res.truncated,
           cap: res.cap,
         });
@@ -307,42 +314,67 @@ function App() {
             <div className="mt-4 text-sm text-slate-500 min-h-[1.25rem] flex flex-col items-center justify-center gap-1">
               {error ? (
                 <span className="text-red-600">Error: {error}</span>
-              ) : results && isRegion ? (
-                <>
-                  <span>
-                    {regionMeta?.truncated ? (
-                      <>
-                        Showing <strong>{count.toLocaleString()}</strong> of{" "}
-                        <strong>{regionMeta.total.toLocaleString()}</strong>{" "}
-                        {selectedSubtype?.label.toLowerCase() ?? "features"}{" "}
-                        across the MAPC region.
-                      </>
-                    ) : (
-                      <>
-                        Found <strong>{count.toLocaleString()}</strong>{" "}
-                        {selectedSubtype?.label.toLowerCase() ?? "features"}{" "}
-                        across the MAPC region.
-                      </>
-                    )}
-                    {count > 0 && (
-                      <>
-                        {"  "}
-                        <button
-                          onClick={handleDownloadAll}
-                          className="text-sky-700 hover:text-sky-900 hover:underline cursor-pointer"
-                        >
-                          Download GeoJSON
-                        </button>
-                      </>
-                    )}
-                  </span>
-                  {regionMeta?.truncated && (
-                    <span className="text-slate-400">
-                      Zoom in or pick a muni to see the rest — richer
-                      region-wide views are coming.
+              ) : regionMeta && isRegion ? (
+                // Three region-result shapes:
+                //   a) Count above threshold — show count only, no map render,
+                //      no download. Most honest answer for high-N features
+                //      like buildings (1M+) where a 5000-point sample misleads.
+                //   b) Rendered (below threshold) with cap truncation —
+                //      rare edge case, "showing X of Y."
+                //   c) Rendered fully — "Found X."
+                regionMeta.renderable === false ? (
+                  <>
+                    <span>
+                      There are{" "}
+                      <strong>{regionMeta.total.toLocaleString()}</strong>{" "}
+                      {selectedSubtype?.label.toLowerCase() ?? "features"}{" "}
+                      across the MAPC region.
                     </span>
-                  )}
-                </>
+                    <span className="text-slate-400">
+                      At this scale a point map isn&apos;t useful — pick a
+                      muni to see them on the map. Aggregated region-wide
+                      views are coming in the next slice.
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span>
+                      {regionMeta.truncated ? (
+                        <>
+                          Showing <strong>{count.toLocaleString()}</strong> of{" "}
+                          <strong>
+                            {regionMeta.total.toLocaleString()}
+                          </strong>{" "}
+                          {selectedSubtype?.label.toLowerCase() ?? "features"}{" "}
+                          across the MAPC region.
+                        </>
+                      ) : (
+                        <>
+                          Found <strong>{count.toLocaleString()}</strong>{" "}
+                          {selectedSubtype?.label.toLowerCase() ?? "features"}{" "}
+                          across the MAPC region.
+                        </>
+                      )}
+                      {count > 0 && (
+                        <>
+                          {"  "}
+                          <button
+                            onClick={handleDownloadAll}
+                            className="text-sky-700 hover:text-sky-900 hover:underline cursor-pointer"
+                          >
+                            Download GeoJSON
+                          </button>
+                        </>
+                      )}
+                    </span>
+                    {regionMeta.truncated && (
+                      <span className="text-slate-400">
+                        Zoom in or pick a muni to see the rest — richer
+                        region-wide views are coming.
+                      </span>
+                    )}
+                  </>
+                )
               ) : (
                 <span>
                   Pick a feature and a place — or click a municipality on the
