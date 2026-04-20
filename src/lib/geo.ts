@@ -110,6 +110,52 @@ export interface MuniSummary {
   subregion: string | null;
 }
 
+/**
+ * Muni + its polygon geometry + precomputed bbox, for fast point-in-muni
+ * binning. The bbox is the 95% cheap-reject path for the choropleth
+ * count query (1M points × 101 munis); without it, every point pays
+ * full ray-cast cost against every muni.
+ */
+export interface MuniIndexEntry {
+  slug: string;
+  name: string;
+  geom: AreaLike;
+  /** [minLng, minLat, maxLng, maxLat] in WGS84. */
+  bbox: [number, number, number, number];
+}
+
+let muniIndexPromise: Promise<MuniIndexEntry[]> | null = null;
+
+/**
+ * Lazy-load every MAPC muni with geometry + bbox, cached for the session.
+ * Used by the choropleth count query.
+ */
+export function loadMuniIndex(): Promise<MuniIndexEntry[]> {
+  if (!muniIndexPromise) {
+    muniIndexPromise = loadMunis().then((fc) => {
+      const out: MuniIndexEntry[] = [];
+      for (const f of fc.features) {
+        const p = (f.properties ?? {}) as { slug?: string; name?: string };
+        if (!p.slug || !p.name) continue;
+        if (
+          f.geometry.type !== "Polygon" &&
+          f.geometry.type !== "MultiPolygon"
+        )
+          continue;
+        const geom = f.geometry as AreaLike;
+        out.push({
+          slug: p.slug,
+          name: p.name,
+          geom,
+          bbox: bboxOfGeometry(geom),
+        });
+      }
+      return out;
+    });
+  }
+  return muniIndexPromise;
+}
+
 /** List of all 101 MAPC munis, alphabetical. Used to populate the dropdown. */
 export async function listMunicipalities(): Promise<MuniSummary[]> {
   const fc = await loadMunis();

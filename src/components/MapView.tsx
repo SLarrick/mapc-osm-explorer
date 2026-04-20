@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
+import type { ChoroplethBins } from "../lib/choropleth";
 
 /**
  * Base map centered on MAPC region.
@@ -35,6 +36,19 @@ interface MapViewProps {
   selectedMuniSlug?: string | null;
   /** Called when the user clicks a muni polygon on the map. */
   onSelectMuni?: (slug: string) => void;
+  /** Slice 4A choropleth. When set, the muni-fill layer paints by
+   *  per-muni feature count using the provided bins. Takes precedence
+   *  over the pre-selection "juice" fill; coexists with post-selection
+   *  (the selected muni still gets the bolder outline, but its fill
+   *  stays on the choropleth color for consistency with its neighbors
+   *  in the regional view).
+   *
+   *  Only meaningful in region mode — focused mode (selectedMuniSlug
+   *  not null) should pass null here so the neighbor-dim style returns. */
+  choropleth?: {
+    counts: Map<string, number>;
+    bins: ChoroplethBins;
+  } | null;
 }
 
 // Layer ids we hit-test for the hover tooltip. The circle layer rides the
@@ -71,6 +85,56 @@ const MUNI_FILL_PRESELECTION: {
     0.15,
   ],
 };
+
+/**
+ * Choropleth fill paint: a `step` expression on feature-state `count`.
+ * Count 0 or missing → the neutral zeroColor. Positive counts step up
+ * through the 6-color ramp by the computed bin stops.
+ *
+ * Opacity is uniform (no hover juice) — the shaded fill is the signal;
+ * juicing it would fight the count legibility.
+ */
+function muniFillChoropleth(bins: ChoroplethBins): {
+  color: maplibregl.ExpressionSpecification;
+  opacity: maplibregl.ExpressionSpecification;
+} {
+  // Default count to 0 when feature-state hasn't been set (unknown muni
+  // or cleared state). MapLibre's ["number", expr, fallback] coerces
+  // null → fallback.
+  const count: maplibregl.ExpressionSpecification = [
+    "number",
+    ["feature-state", "count"],
+    0,
+  ];
+  return {
+    color: [
+      "case",
+      ["<=", count, 0],
+      bins.zeroColor,
+      [
+        "step",
+        count,
+        bins.colors[0],
+        bins.stops[0] + 1,
+        bins.colors[1],
+        bins.stops[1] + 1,
+        bins.colors[2],
+        bins.stops[2] + 1,
+        bins.colors[3],
+        bins.stops[3] + 1,
+        bins.colors[4],
+        bins.stops[4] + 1,
+        bins.colors[5],
+      ],
+    ],
+    opacity: [
+      "case",
+      ["<=", count, 0],
+      0.35, // dim but visible so "no data" munis still read as part of the region
+      0.7, // shaded fill — dominant signal
+    ],
+  };
+}
 
 function muniFillPostSelection(slug: string): {
   color: maplibregl.ExpressionSpecification;
@@ -112,6 +176,7 @@ export function MapView({
   onSelectFeature,
   selectedMuniSlug,
   onSelectMuni,
+  choropleth,
 }: MapViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -128,6 +193,12 @@ export function MapView({
   onSelectMuniRef.current = onSelectMuni;
 
   const prevSelectedIdRef = useRef<string | null>(null);
+
+  // Choropleth state: latest prop kept in a ref so the map-load callback
+  // can re-apply on initial render (user could pick a feature + region
+  // before the map has finished loading).
+  const choroplethRef = useRef<typeof choropleth>(choropleth ?? null);
+  choroplethRef.current = choropleth ?? null;
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -155,12 +226,17 @@ export function MapView({
     popupRef.current = popup;
 
     map.on("load", async () => {
-      const [boundaryRes, muniRes] = await Promise.all([
+      const [boundaryRes, muniRes, maRes] = await Promise.all([
         fetch("/data/mapc-boundary.geojson"),
         fetch("/data/mapc-municipalities.geojson"),
+        // MA boundary is optional: if the fetch script hasn't been run,
+        // we skip the state-boundary layer without breaking the map.
+        fetch("/data/ma-boundary.geojson").catch(() => null),
       ]);
       const boundary = await boundaryRes.json();
       const munis = await muniRes.json();
+      const ma =
+        maRes && maRes.ok ? await maRes.json().catch(() => null) : null;
       munisFcRef.current = munis;
       boundaryBboxRef.current = boundsOfFeatureCollection(boundary);
 
@@ -170,6 +246,9 @@ export function MapView({
         data: munis,
         promoteId: "slug",
       });
+      if (ma) {
+        map.addSource("ma-state-boundary", { type: "geojson", data: ma });
+      }
 
       // Municipality fill (hoverable)
       map.addLayer({
@@ -193,7 +272,26 @@ export function MapView({
         },
       });
 
-      // MAPC outer boundary — thick, on top of munis
+      // Massachusetts state boundary — reference line, intentionally
+      // lighter + thinner than the MAPC boundary. Its job is purely to
+      // anchor the eye geographically ("MAPC sits inside MA"); it should
+      // not compete visually with the MAPC emphasis or with data layers.
+      // Only drawn when the /data/ma-boundary.geojson asset is present.
+      if (ma) {
+        map.addLayer({
+          id: "ma-state-boundary-outline",
+          type: "line",
+          source: "ma-state-boundary",
+          paint: {
+            "line-color": "#64748b", // slate-500
+            "line-width": 0.9,
+            "line-opacity": 0.55,
+            "line-dasharray": [4, 3],
+          },
+        });
+      }
+
+      // MAPC outer boundary — thick, on top of munis and state line
       map.addLayer({
         id: "mapc-boundary-outline",
         type: "line",
@@ -287,12 +385,24 @@ export function MapView({
         applySelection(map, prevSelectedIdRef.current, selectedIdRef.current);
         prevSelectedIdRef.current = selectedIdRef.current;
       }
-      // Apply initial muni selection, if any
+      // Apply initial muni selection + choropleth, if any. Choropleth
+      // state (per-muni count) is applied first so the fill-paint swap
+      // sees up-to-date feature-state.
+      applyChoroplethFeatureState(
+        map,
+        choroplethRef.current?.counts ?? null,
+        munisFcRef.current,
+      );
       applyMuniSelection(
         map,
         selectedMuniSlugRef.current,
         munisFcRef.current,
         boundaryBboxRef.current,
+      );
+      applyMuniFillPaint(
+        map,
+        selectedMuniSlugRef.current,
+        choroplethRef.current,
       );
     });
 
@@ -328,8 +438,8 @@ export function MapView({
     prevSelectedIdRef.current = next;
   }, [selectedId]);
 
-  // Sync selectedMuniSlug prop → muni-fill paint swap, filter update, and
-  // camera movement.
+  // Sync selectedMuniSlug prop → selected-outline filter, camera fly-to,
+  // and fill-paint swap (coordinated with choropleth state).
   const selectedMuniSlugRef = useRef<string | null>(selectedMuniSlug ?? null);
   useEffect(() => {
     const slug = selectedMuniSlug ?? null;
@@ -337,7 +447,23 @@ export function MapView({
     const map = mapRef.current;
     if (!map || !mapReadyRef.current) return;
     applyMuniSelection(map, slug, munisFcRef.current, boundaryBboxRef.current);
+    applyMuniFillPaint(map, slug, choroplethRef.current);
   }, [selectedMuniSlug]);
+
+  // Sync choropleth prop → per-muni feature-state + fill-paint swap.
+  // Feature-state is cleared and re-set on every change; the paint
+  // expression reads feature-state["count"] and the ["step"] stops
+  // come from bins in the paint expression itself.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReadyRef.current) return;
+    applyChoroplethFeatureState(
+      map,
+      choropleth?.counts ?? null,
+      munisFcRef.current,
+    );
+    applyMuniFillPaint(map, selectedMuniSlugRef.current, choropleth ?? null);
+  }, [choropleth]);
 
   return (
     <div
@@ -348,9 +474,11 @@ export function MapView({
 }
 
 /**
- * Swap the muni-fill paint between the pre- and post-selection stylings,
- * update the "selected outline" layer filter, and fly the camera to the
- * selected muni's bbox (or back to the MAPC extent when deselecting).
+ * Update the selected-muni outline filter + fly the camera to its bbox
+ * (or back to the MAPC extent on deselect). Does NOT touch the muni-fill
+ * paint — that's `applyMuniFillPaint`'s responsibility, because the
+ * fill has a third state (choropleth) that this function doesn't know
+ * about.
  */
 function applyMuniSelection(
   map: maplibregl.Map,
@@ -358,14 +486,10 @@ function applyMuniSelection(
   munisFc: GeoJSON.FeatureCollection | null,
   regionBbox: [number, number, number, number] | null,
 ): void {
-  if (!map.getLayer("munis-fill")) return;
+  if (!map.getLayer("munis-selected-outline")) return;
 
   if (slug) {
-    const paint = muniFillPostSelection(slug);
-    map.setPaintProperty("munis-fill", "fill-color", paint.color);
-    map.setPaintProperty("munis-fill", "fill-opacity", paint.opacity);
     map.setFilter("munis-selected-outline", ["==", ["get", "slug"], slug]);
-    // Fly to the selected muni bbox
     if (munisFc) {
       const feat = munisFc.features.find(
         (f) => (f.properties as { slug?: string } | null)?.slug === slug,
@@ -381,28 +505,66 @@ function applyMuniSelection(
       }
     }
   } else {
-    map.setPaintProperty(
-      "munis-fill",
-      "fill-color",
-      MUNI_FILL_PRESELECTION.color,
-    );
-    map.setPaintProperty(
-      "munis-fill",
-      "fill-opacity",
-      MUNI_FILL_PRESELECTION.opacity,
-    );
     map.setFilter("munis-selected-outline", [
       "==",
       ["get", "slug"],
       "__none__",
     ]);
-    // Zoom back out to the MAPC region so the landing-mode map matches
-    // the initial view.
     if (regionBbox)
       map.fitBounds(regionBbox, {
         padding: 24,
         duration: 600,
       });
+  }
+}
+
+/**
+ * Three-mode fill-paint swap. Priority: choropleth > post-selection >
+ * pre-selection. App.tsx enforces that choropleth and selectedMuniSlug
+ * aren't both set (choropleth clears on muni-focus), but we handle the
+ * collision gracefully just in case.
+ */
+function applyMuniFillPaint(
+  map: maplibregl.Map,
+  selectedMuniSlug: string | null,
+  choropleth: MapViewProps["choropleth"] | null,
+): void {
+  if (!map.getLayer("munis-fill")) return;
+
+  let paint: {
+    color: maplibregl.ExpressionSpecification;
+    opacity: maplibregl.ExpressionSpecification;
+  };
+  if (choropleth) {
+    paint = muniFillChoropleth(choropleth.bins);
+  } else if (selectedMuniSlug) {
+    paint = muniFillPostSelection(selectedMuniSlug);
+  } else {
+    paint = {
+      color: MUNI_FILL_PRESELECTION.color,
+      opacity: MUNI_FILL_PRESELECTION.opacity,
+    };
+  }
+  map.setPaintProperty("munis-fill", "fill-color", paint.color);
+  map.setPaintProperty("munis-fill", "fill-opacity", paint.opacity);
+}
+
+/**
+ * Clear + re-set the `count` feature-state on every muni. MapLibre reads
+ * feature-state by id, so we use promoteId="slug" → id=slug. Passing
+ * null clears all counts (e.g. when the user backs out to landing).
+ */
+function applyChoroplethFeatureState(
+  map: maplibregl.Map,
+  counts: Map<string, number> | null,
+  munisFc: GeoJSON.FeatureCollection | null,
+): void {
+  if (!munisFc) return;
+  for (const f of munisFc.features) {
+    const slug = (f.properties as { slug?: string } | null)?.slug;
+    if (!slug) continue;
+    const n = counts?.get(slug) ?? 0;
+    map.setFeatureState({ source: "mapc-munis", id: slug }, { count: n });
   }
 }
 

@@ -54,8 +54,36 @@ public/data/
   _manifest.json
 ```
 
-Each parquet has columns: `osm_id`, `osm_type`, `category`, `name`,
-`tags` (JSON string), `geometry_wkb` (binary WKB).
+Each parquet has columns:
+
+- `osm_id` — OSM element id.
+- `osm_type` — `node`, `way`, or `relation`. Relations are typically
+  multipolygons (parks with holes, water bodies with islands, town
+  halls with courtyards); the ETL assembles their geometries from
+  member ways with outer/inner roles.
+- `category` — parquet-level tag, duplicated on every row for convenience.
+- `name` — OSM `name` tag (nullable).
+- `tags` — full tag map as a JSON string.
+- `geometry_wkb` — full geometry as OGC WKB (POINT / LINESTRING /
+  POLYGON / MULTIPOLYGON).
+- `centroid_lon`, `centroid_lat` — bbox-centroid scalars. Used by the
+  region choropleth query so it doesn't need to fetch/parse the WKB
+  payload just to locate each feature. ~16 bytes/row ≈ 16MB for 1M
+  buildings, well worth it vs the WKB-parse alternative.
+
+## MA state boundary asset
+
+The map renders a thin MA state boundary outside the MAPC region for
+geographic context. It's a separate one-time asset:
+
+```bash
+python3 etl/fetch_ma_boundary.py
+```
+
+This downloads TIGER/Line 2023 (US Census Bureau, public domain),
+simplifies to ~100m tolerance, and writes `public/data/ma-boundary.geojson`
+(~8KB). Commit the output. Re-run only if you want a newer vintage;
+the shape doesn't change perceptibly year-over-year at MAPC-region zoom.
 
 ## Refresh cadence
 

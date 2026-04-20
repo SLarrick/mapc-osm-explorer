@@ -23,6 +23,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { MapView } from "./components/MapView";
 import { DetailPanel, downloadGeoJSON } from "./components/DetailPanel";
+import { ChoroplethLegend } from "./components/ChoroplethLegend";
 import { FeaturePicker, MuniPicker, MAPC_REGION_SLUG } from "./components/Pickers";
 import {
   findFeaturesInMuni,
@@ -31,6 +32,7 @@ import {
 } from "./lib/queries";
 import { listMunicipalities, type MuniSummary } from "./lib/geo";
 import { getSubtypeBySlug } from "./lib/taxonomy";
+import { computeChoropleth } from "./lib/choropleth";
 
 interface ManifestCategory {
   slug: string;
@@ -42,12 +44,16 @@ interface ManifestCategory {
  * false, the total count was above our render threshold (too many to
  * make a useful point map) and we skipped the feature fetch entirely.
  * The UI leans on `total` alone in that case.
+ *
+ * `countsByMuni` drives the Slice 4A choropleth — always present for
+ * region queries, shown whenever we're in region mode.
  */
 interface RegionMeta {
   total: number;
   renderable: boolean;
   truncated: boolean;
   cap: number;
+  countsByMuni: Map<string, number>;
 }
 
 function App() {
@@ -95,15 +101,30 @@ function App() {
     };
   }, []);
 
-  // Geography change (muni switch, region pick, deselect) invalidates any
-  // stale results — otherwise the previous query's pins would hover over
-  // the new geography while the new query runs.
+  // Geography/subtype change invalidates stale results — otherwise the
+  // previous query's pins would hover over the new geography while the
+  // new query runs.
+  //
+  // Auto-rerun policy: if the user already had an active query (results
+  // or regionMeta non-null) AND both selections are still set, kick off
+  // a new query for the new (muni, subtype) pair automatically. This is
+  // what makes "I searched region-wide playgrounds, now click Salem"
+  // feel continuous instead of forcing a second "Find data" click. Same
+  // principle in reverse (back to region) and on subtype swaps within
+  // the same muni.
   useEffect(() => {
+    const hadActiveQuery = results !== null || regionMeta !== null;
     setResults(null);
     setRegionMeta(null);
     setSelectedId(null);
     setError(null);
-  }, [selectedMuniSlug]);
+    if (hadActiveQuery && selectedSubtypeSlug && selectedMuniSlug) {
+      void handleFind();
+    }
+    // We deliberately depend only on the *selections* — results/regionMeta
+    // would cause a re-run loop (handleFind sets them).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedMuniSlug, selectedSubtypeSlug]);
 
   const isRegion = selectedMuniSlug === MAPC_REGION_SLUG;
 
@@ -121,6 +142,7 @@ function App() {
           renderable: res.renderable,
           truncated: res.truncated,
           cap: res.cap,
+          countsByMuni: res.countsByMuni,
         });
       } else {
         const fc = await findFeaturesInMuni(
@@ -185,6 +207,18 @@ function App() {
   /** For the MapView, region-mode looks the same as no-selection: no
    *  focus paint, no fit-bounds-to-muni. Pass null to opt out of those. */
   const mapMuniSlug = isRegion ? null : selectedMuniSlug;
+
+  // Choropleth: only in region mode, only after a region query has run.
+  // Focused mode must pass null so the muni-fill reverts to the
+  // neighbor-dim post-selection style. Bins are recomputed whenever
+  // the count map changes — cheap (101 values, O(n log n)).
+  const choropleth = useMemo(() => {
+    if (!isRegion || !regionMeta) return null;
+    return {
+      counts: regionMeta.countsByMuni,
+      bins: computeChoropleth(regionMeta.countsByMuni),
+    };
+  }, [isRegion, regionMeta]);
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col">
@@ -331,9 +365,9 @@ function App() {
                       across the MAPC region.
                     </span>
                     <span className="text-slate-400">
-                      At this scale a full render isn&apos;t useful — pick
-                      a muni to see them on the map. Aggregated region-wide
-                      views are coming in the next slice.
+                      Too many to render as points — the map shades each
+                      muni by count instead. Click a muni for the full
+                      feature-level view.
                     </span>
                   </>
                 ) : (
@@ -398,7 +432,14 @@ function App() {
               onSelectFeature={setSelectedId}
               selectedMuniSlug={mapMuniSlug}
               onSelectMuni={setSelectedMuniSlug}
+              choropleth={choropleth}
             />
+            {choropleth && selectedSubtype && (
+              <ChoroplethLegend
+                bins={choropleth.bins}
+                subtypeLabel={selectedSubtype.label}
+              />
+            )}
             {selectedFeature && (
               <DetailPanel
                 feature={selectedFeature}

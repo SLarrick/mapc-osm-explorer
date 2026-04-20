@@ -5,7 +5,12 @@
  */
 import { runSql } from "./duckdb";
 import { parseWkbGeometry } from "./wkb";
-import { getMunicipalityBySlug, pointInArea } from "./geo";
+import {
+  getMunicipalityBySlug,
+  loadMuniIndex,
+  pointInArea,
+  type MuniIndexEntry,
+} from "./geo";
 import {
   filterToSql,
   getSubtypeBySlug,
@@ -141,6 +146,17 @@ export interface RegionResult {
   truncated: boolean;
   /** Render cap used if the feature query ran. */
   cap: number;
+  /** Feature count per MAPC muni slug, derived from feature centroids.
+   *  Always present for region queries — this drives the choropleth
+   *  layer, which is the honest regional view for high-N features
+   *  where a raw point render is noise (Slice 4A). Munis with zero
+   *  features are absent from the map (consumers should treat
+   *  missing as 0). */
+  countsByMuni: Map<string, number>;
+  /** True when we had to fall back to parsing WKB for centroids because
+   *  the parquet didn't ship centroid_lon/centroid_lat. Indicates the
+   *  ETL is on an older snapshot; functional but slower and more bandwidth. */
+  centroidsWereSlow: boolean;
 }
 
 /**
@@ -208,13 +224,23 @@ export async function findFeaturesInRegion(
   `);
   const totalCount = Number(countRows[0]?.n ?? 0);
 
-  // Count above the render threshold — skip phase 2 entirely. This saves
-  // both bandwidth (no WKB payload) and render time (no GeoJSON source
-  // update). The UI will lean on the count alone.
+  // Phase 2: per-muni counts from centroids. This runs for every region
+  // query so the choropleth is always available; it's cheap because the
+  // centroid_lon/centroid_lat scalar columns are tiny (two doubles per
+  // row) compared to the WKB payload.
+  const { countsByMuni, centroidsWereSlow } = await countCentroidsByMuni(
+    parquetUrl,
+    where,
+  );
+
+  // Phase 3: feature-geometry fetch. Skipped entirely above the render
+  // threshold — the choropleth is the answer at that scale; a raw point
+  // render would be noise. Below threshold we still fetch shapes (up
+  // to cap) and layer them on top of the choropleth.
   if (totalCount > threshold) {
     // eslint-disable-next-line no-console
     console.log(
-      `[region-query] ${subtypeSlug}: ${totalCount} features — above render threshold (${threshold}), skipping geometry fetch`,
+      `[region-query] ${subtypeSlug}: ${totalCount} features — above render threshold (${threshold}), skipping geometry fetch (choropleth only)`,
     );
     return {
       fc: { type: "FeatureCollection", features: [] },
@@ -222,10 +248,11 @@ export async function findFeaturesInRegion(
       renderable: false,
       truncated: false,
       cap,
+      countsByMuni,
+      centroidsWereSlow,
     };
   }
 
-  // Phase 2: fetch capped rows and parse geometries.
   const rows = await runSql<RawRow>(`
     SELECT osm_id, osm_type, name, CAST(tags AS VARCHAR) AS tags, geometry_wkb
     FROM '${parquetUrl}'
@@ -276,5 +303,91 @@ export async function findFeaturesInRegion(
     renderable: true,
     truncated,
     cap,
+    countsByMuni,
+    centroidsWereSlow,
   };
+}
+
+/**
+ * Run a centroid-only query and bin every feature into its containing
+ * MAPC muni. Returns a count map keyed by muni slug.
+ *
+ * Two paths:
+ *   - Fast path: the parquet has centroid_lon / centroid_lat scalar
+ *     columns (ETL ≥ 2026-04-b). We SELECT just those two doubles per
+ *     row — no WKB in the payload.
+ *   - Fallback: older parquet without centroid columns. We re-select
+ *     geometry_wkb and compute the centroid client-side. Slower and
+ *     heavier, but keeps the app functional on stale data. Logged.
+ *
+ * Binning is O(N × M) with bbox pre-filtering (M ≈ 101 munis). For
+ * 1M buildings this completes in ~1-2s on an M-series Mac.
+ */
+async function countCentroidsByMuni(
+  parquetUrl: string,
+  where: string,
+): Promise<{
+  countsByMuni: Map<string, number>;
+  centroidsWereSlow: boolean;
+}> {
+  const munis = await loadMuniIndex();
+  const counts = new Map<string, number>();
+  for (const m of munis) counts.set(m.slug, 0);
+
+  let centroidsWereSlow = false;
+  let centroids: Array<[number, number]>;
+  try {
+    const rows = await runSql<{ lon: number; lat: number }>(`
+      SELECT centroid_lon AS lon, centroid_lat AS lat
+      FROM '${parquetUrl}'
+      WHERE ${where}
+    `);
+    centroids = rows.map((r) => [r.lon, r.lat]);
+  } catch (err) {
+    // Assume the failure is "column not found" from a pre-centroid
+    // parquet. Fall back to WKB + client-side centroid.
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[region-query] centroid columns not available, falling back to WKB parse:",
+      err,
+    );
+    centroidsWereSlow = true;
+    const rows = await runSql<{ geometry_wkb: Uint8Array }>(`
+      SELECT geometry_wkb
+      FROM '${parquetUrl}'
+      WHERE ${where}
+    `);
+    centroids = [];
+    for (const r of rows) {
+      const parsed = parseWkbGeometry(r.geometry_wkb);
+      if (!parsed) continue;
+      centroids.push([parsed.center[0], parsed.center[1]]);
+    }
+  }
+
+  binCentroidsIntoMunis(centroids, munis, counts);
+  return { countsByMuni: counts, centroidsWereSlow };
+}
+
+function binCentroidsIntoMunis(
+  centroids: Array<[number, number]>,
+  munis: MuniIndexEntry[],
+  counts: Map<string, number>,
+): void {
+  for (const [lon, lat] of centroids) {
+    for (const muni of munis) {
+      // bbox pre-filter: cheap reject for ~95% of (point, muni) pairs.
+      if (
+        lon < muni.bbox[0] ||
+        lon > muni.bbox[2] ||
+        lat < muni.bbox[1] ||
+        lat > muni.bbox[3]
+      )
+        continue;
+      if (pointInArea([lon, lat], muni.geom)) {
+        counts.set(muni.slug, (counts.get(muni.slug) ?? 0) + 1);
+        break; // points belong to at most one muni
+      }
+    }
+  }
 }

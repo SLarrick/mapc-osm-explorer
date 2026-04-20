@@ -7,99 +7,99 @@
       "slug": "public-safety-and-health",
       "label": "Public Safety & Health",
       "file": "public-safety-and-health.parquet",
-      "feature_count": 9042,
-      "file_size_bytes": 365937,
+      "feature_count": 9050,
+      "file_size_bytes": 498412,
       "simplified": false
     },
     {
       "slug": "transit",
       "label": "Transit",
       "file": "transit.parquet",
-      "feature_count": 10144,
-      "file_size_bytes": 533329,
+      "feature_count": 10164,
+      "file_size_bytes": 694426,
       "simplified": false
     },
     {
       "slug": "food-access",
       "label": "Food Access",
       "file": "food-access.parquet",
-      "feature_count": 6909,
-      "file_size_bytes": 810463,
+      "feature_count": 6947,
+      "file_size_bytes": 939710,
       "simplified": false
     },
     {
       "slug": "civic-and-government",
       "label": "Civic & Government",
       "file": "civic-and-government.parquet",
-      "feature_count": 484,
-      "file_size_bytes": 90760,
+      "feature_count": 486,
+      "file_size_bytes": 98991,
       "simplified": false
     },
     {
       "slug": "community-facilities",
       "label": "Community Facilities",
       "file": "community-facilities.parquet",
-      "feature_count": 3911,
-      "file_size_bytes": 957390,
+      "feature_count": 4012,
+      "file_size_bytes": 1109373,
       "simplified": false
     },
     {
       "slug": "parks-and-recreation",
       "label": "Parks & Recreation",
       "file": "parks-and-recreation.parquet",
-      "feature_count": 20196,
-      "file_size_bytes": 5286086,
+      "feature_count": 21269,
+      "file_size_bytes": 7821188,
       "simplified": false
     },
     {
       "slug": "active-transportation",
       "label": "Active Transportation",
       "file": "active-transportation.parquet",
-      "feature_count": 165574,
-      "file_size_bytes": 17643492,
+      "feature_count": 165686,
+      "file_size_bytes": 20084711,
       "simplified": false
     },
     {
       "slug": "streetscape",
       "label": "Streetscape",
       "file": "streetscape.parquet",
-      "feature_count": 165955,
-      "file_size_bytes": 6092465,
+      "feature_count": 165902,
+      "file_size_bytes": 8654305,
       "simplified": false
     },
     {
       "slug": "natural-features-and-green-infrastructure",
       "label": "Natural Features & Green Infrastructure",
       "file": "natural-features-and-green-infrastructure.parquet",
-      "feature_count": 87369,
-      "file_size_bytes": 24547366,
+      "feature_count": 89361,
+      "file_size_bytes": 33275742,
       "simplified": false
     },
     {
       "slug": "streets-and-roadways",
       "label": "Streets & Roadways",
       "file": "streets-and-roadways.parquet",
-      "feature_count": 242224,
-      "file_size_bytes": 32704605,
+      "feature_count": 242187,
+      "file_size_bytes": 36078205,
       "simplified": false
     },
     {
       "slug": "housing-and-land-use",
       "label": "Housing & Land Use",
       "file": "housing-and-land-use.parquet",
-      "feature_count": 5202,
-      "file_size_bytes": 1316727,
+      "feature_count": 5419,
+      "file_size_bytes": 1583558,
       "simplified": false
     },
     {
       "slug": "buildings-and-addresses",
       "label": "Buildings & Addresses",
       "file": "buildings-and-addresses.parquet",
-      "feature_count": 1024546,
-      "file_size_bytes": 97071704,
+      "feature_count": 1030059,
+      "file_size_bytes": 112026210,
       "simplified": true
     }
   ],
-  "total_features": 1741556,
-  "total_bytes": 187420324
+  "total_features": 1750542,
+  "total_bytes": 222864831
 }
