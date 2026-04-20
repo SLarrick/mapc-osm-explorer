@@ -127,8 +127,9 @@ export function binForCount(count: number, bins: ChoroplethBins): number {
 /**
  * Group muni slugs by their bin index (0-5). Does not include bin -1
  * (zero-count munis); callers usually show "0" as a separate row.
- * Returns an array indexed by bin, each entry sorted alphabetically
- * by muni name.
+ * Returns an array indexed by bin, each entry sorted by count descending
+ * (alphabetical tie-break) — within a bin, the user usually wants to see
+ * the biggest contributors first rather than scan an alphabetical list.
  */
 export function groupMunisByBin(
   counts: Map<string, number>,
@@ -147,7 +148,12 @@ export function groupMunisByBin(
       count,
     });
   }
-  for (const group of out) group.sort((a, b) => a.name.localeCompare(b.name));
+  for (const group of out) {
+    group.sort((a, b) => {
+      if (a.count !== b.count) return b.count - a.count;
+      return a.name.localeCompare(b.name);
+    });
+  }
   return out;
 }
 
