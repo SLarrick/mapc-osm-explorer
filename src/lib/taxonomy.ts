@@ -22,6 +22,21 @@ export type TagFilter =
   | { kind: "eq"; key: string; values: string[] }
   | { kind: "present"; key: string };
 
+/**
+ * Hand-curated estimate of how complete OSM's coverage of this feature
+ * type is across the MAPC region. Used to:
+ *   - pick a default rendering strategy at regional scale (raw vs
+ *     choropleth vs "where-has-mapping-happened?")
+ *   - decide whether to surface a prominent coverage caveat
+ *
+ * "high"    — authoritative sources (MassGIS imports, DESE rosters, etc.)
+ *             or feature type important enough that mappers keep it current
+ * "partial" — substantial but uneven; enough signal to be useful with caveat
+ * "spotty"  — mapping effort is the dominant signal; treat counts as
+ *             "where has mapping happened?" rather than ground truth
+ */
+export type CompletenessTier = "high" | "partial" | "spotty";
+
 export interface Subtype {
   /** Globally unique user-facing slug, e.g. "playgrounds". */
   slug: string;
@@ -31,6 +46,8 @@ export interface Subtype {
   categorySlug: string;
   /** Predicate on the parquet's `tags` JSON column. */
   filter: TagFilter;
+  /** Rough OSM-completeness tier. First-draft hand-curated; refine over time. */
+  completeness: CompletenessTier;
 }
 
 /**
@@ -45,18 +62,21 @@ export const SUBTYPES: Subtype[] = [
     label: "Hospitals",
     categorySlug: "public-safety-and-health",
     filter: { kind: "eq", key: "amenity", values: ["hospital"] },
+    completeness: "high",
   },
   {
     slug: "fire-stations",
     label: "Fire stations",
     categorySlug: "public-safety-and-health",
     filter: { kind: "eq", key: "amenity", values: ["fire_station"] },
+    completeness: "high",
   },
   {
     slug: "police-stations",
     label: "Police stations",
     categorySlug: "public-safety-and-health",
     filter: { kind: "eq", key: "amenity", values: ["police"] },
+    completeness: "high",
   },
 
   // Transit
@@ -65,18 +85,21 @@ export const SUBTYPES: Subtype[] = [
     label: "Bus stops",
     categorySlug: "transit",
     filter: { kind: "eq", key: "highway", values: ["bus_stop"] },
+    completeness: "high",
   },
   {
     slug: "train-stations",
     label: "Train stations",
     categorySlug: "transit",
     filter: { kind: "eq", key: "railway", values: ["station", "halt"] },
+    completeness: "high",
   },
   {
     slug: "subway-stations",
     label: "Subway stations",
     categorySlug: "transit",
     filter: { kind: "eq", key: "station", values: ["subway"] },
+    completeness: "high",
   },
 
   // Food Access
@@ -85,18 +108,21 @@ export const SUBTYPES: Subtype[] = [
     label: "Supermarkets",
     categorySlug: "food-access",
     filter: { kind: "eq", key: "shop", values: ["supermarket"] },
+    completeness: "partial",
   },
   {
     slug: "restaurants",
     label: "Restaurants",
     categorySlug: "food-access",
     filter: { kind: "eq", key: "amenity", values: ["restaurant"] },
+    completeness: "partial",
   },
   {
     slug: "cafes",
     label: "Cafés",
     categorySlug: "food-access",
     filter: { kind: "eq", key: "amenity", values: ["cafe"] },
+    completeness: "partial",
   },
 
   // Civic & Government
@@ -105,18 +131,21 @@ export const SUBTYPES: Subtype[] = [
     label: "Town halls",
     categorySlug: "civic-and-government",
     filter: { kind: "eq", key: "amenity", values: ["townhall"] },
+    completeness: "high",
   },
   {
     slug: "libraries",
     label: "Libraries",
     categorySlug: "civic-and-government",
     filter: { kind: "eq", key: "amenity", values: ["library"] },
+    completeness: "high",
   },
   {
     slug: "post-offices",
     label: "Post offices",
     categorySlug: "civic-and-government",
     filter: { kind: "eq", key: "amenity", values: ["post_office"] },
+    completeness: "high",
   },
 
   // Community Facilities
@@ -129,18 +158,21 @@ export const SUBTYPES: Subtype[] = [
       key: "amenity",
       values: ["school", "kindergarten"],
     },
+    completeness: "high",
   },
   {
     slug: "places-of-worship",
     label: "Places of worship",
     categorySlug: "community-facilities",
     filter: { kind: "eq", key: "amenity", values: ["place_of_worship"] },
+    completeness: "partial",
   },
   {
     slug: "community-centers",
     label: "Community centers",
     categorySlug: "community-facilities",
     filter: { kind: "eq", key: "amenity", values: ["community_centre"] },
+    completeness: "partial",
   },
 
   // Parks & Recreation
@@ -149,6 +181,7 @@ export const SUBTYPES: Subtype[] = [
     label: "Playgrounds",
     categorySlug: "parks-and-recreation",
     filter: { kind: "eq", key: "leisure", values: ["playground"] },
+    completeness: "partial",
   },
   {
     slug: "parks",
@@ -159,12 +192,14 @@ export const SUBTYPES: Subtype[] = [
       key: "leisure",
       values: ["park", "nature_reserve"],
     },
+    completeness: "high",
   },
   {
     slug: "sports-fields",
     label: "Sports fields",
     categorySlug: "parks-and-recreation",
     filter: { kind: "eq", key: "leisure", values: ["pitch"] },
+    completeness: "partial",
   },
 
   // Active Transportation
@@ -173,18 +208,21 @@ export const SUBTYPES: Subtype[] = [
     label: "Bike paths",
     categorySlug: "active-transportation",
     filter: { kind: "eq", key: "highway", values: ["cycleway"] },
+    completeness: "partial",
   },
   {
     slug: "footpaths",
     label: "Footpaths",
     categorySlug: "active-transportation",
     filter: { kind: "eq", key: "highway", values: ["footway"] },
+    completeness: "partial",
   },
   {
     slug: "trails",
     label: "Trails",
     categorySlug: "active-transportation",
     filter: { kind: "eq", key: "highway", values: ["path"] },
+    completeness: "partial",
   },
 
   // Streetscape
@@ -193,18 +231,21 @@ export const SUBTYPES: Subtype[] = [
     label: "Benches",
     categorySlug: "streetscape",
     filter: { kind: "eq", key: "amenity", values: ["bench"] },
+    completeness: "spotty",
   },
   {
     slug: "bike-parking",
     label: "Bike parking",
     categorySlug: "streetscape",
     filter: { kind: "eq", key: "amenity", values: ["bicycle_parking"] },
+    completeness: "spotty",
   },
   {
     slug: "street-trees",
     label: "Street trees",
     categorySlug: "streetscape",
     filter: { kind: "eq", key: "natural", values: ["tree"] },
+    completeness: "spotty",
   },
 
   // Natural Features & Green Infrastructure
@@ -213,18 +254,21 @@ export const SUBTYPES: Subtype[] = [
     label: "Water bodies",
     categorySlug: "natural-features-and-green-infrastructure",
     filter: { kind: "eq", key: "natural", values: ["water"] },
+    completeness: "high",
   },
   {
     slug: "forests",
     label: "Forests",
     categorySlug: "natural-features-and-green-infrastructure",
     filter: { kind: "eq", key: "natural", values: ["wood"] },
+    completeness: "high",
   },
   {
     slug: "wetlands",
     label: "Wetlands",
     categorySlug: "natural-features-and-green-infrastructure",
     filter: { kind: "eq", key: "natural", values: ["wetland"] },
+    completeness: "high",
   },
 
   // Streets & Roadways
@@ -233,18 +277,21 @@ export const SUBTYPES: Subtype[] = [
     label: "Primary roads",
     categorySlug: "streets-and-roadways",
     filter: { kind: "eq", key: "highway", values: ["primary", "trunk"] },
+    completeness: "high",
   },
   {
     slug: "residential-streets",
     label: "Residential streets",
     categorySlug: "streets-and-roadways",
     filter: { kind: "eq", key: "highway", values: ["residential"] },
+    completeness: "high",
   },
   {
     slug: "highways",
     label: "Highways",
     categorySlug: "streets-and-roadways",
     filter: { kind: "eq", key: "highway", values: ["motorway"] },
+    completeness: "high",
   },
 
   // Housing & Land Use
@@ -253,18 +300,21 @@ export const SUBTYPES: Subtype[] = [
     label: "Residential land",
     categorySlug: "housing-and-land-use",
     filter: { kind: "eq", key: "landuse", values: ["residential"] },
+    completeness: "high",
   },
   {
     slug: "commercial-land",
     label: "Commercial land",
     categorySlug: "housing-and-land-use",
     filter: { kind: "eq", key: "landuse", values: ["commercial", "retail"] },
+    completeness: "high",
   },
   {
     slug: "industrial-land",
     label: "Industrial land",
     categorySlug: "housing-and-land-use",
     filter: { kind: "eq", key: "landuse", values: ["industrial"] },
+    completeness: "high",
   },
 
   // Buildings & Addresses
@@ -273,12 +323,14 @@ export const SUBTYPES: Subtype[] = [
     label: "All buildings",
     categorySlug: "buildings-and-addresses",
     filter: { kind: "present", key: "building" },
+    completeness: "high",
   },
   {
     slug: "addresses",
     label: "Addresses",
     categorySlug: "buildings-and-addresses",
     filter: { kind: "present", key: "addr:housenumber" },
+    completeness: "high",
   },
 ];
 

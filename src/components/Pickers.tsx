@@ -92,6 +92,13 @@ export function MuniPicker({ munis, value, onChange }: MuniPickerProps) {
       <option value="" disabled>
         pick a place
       </option>
+      {/* Region-wide option sits in its own optgroup at the top, above the
+          sub-region groups. Native <select> can't render a visual divider,
+          but the solo-group position and "Entire MAPC region" phrasing
+          read as a distinct tier from the 101 individual munis. */}
+      <optgroup label="Region-wide">
+        <option value={MAPC_REGION_SLUG}>Entire MAPC region</option>
+      </optgroup>
       {grouped.map((g) => (
         <optgroup key={g.label} label={g.label}>
           {g.items.map((m) => (
@@ -104,6 +111,14 @@ export function MuniPicker({ munis, value, onChange }: MuniPickerProps) {
     </PillSelect>
   );
 }
+
+/**
+ * Sentinel slug for "whole MAPC region" in the muni dropdown. Using a
+ * sentinel rather than a separate state keeps the dropdown as the single
+ * source of truth for the geography selection. Callers branch on it to
+ * drive the region-wide query path (see App.tsx / queries.ts).
+ */
+export const MAPC_REGION_SLUG = "mapc-region";
 
 /**
  * The dashed sky-blue pill as a real <select>. We keep the native arrow
