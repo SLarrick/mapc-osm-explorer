@@ -24,6 +24,7 @@ import { useEffect, useMemo, useState } from "react";
 import { MapView } from "./components/MapView";
 import { DetailPanel, downloadGeoJSON } from "./components/DetailPanel";
 import { ChoroplethLegend } from "./components/ChoroplethLegend";
+import { TableView, type TableScope } from "./components/TableView";
 import { FeaturePicker, MuniPicker, MAPC_REGION_SLUG } from "./components/Pickers";
 import {
   findFeaturesInMuni,
@@ -33,6 +34,8 @@ import {
 import { listMunicipalities, type MuniSummary } from "./lib/geo";
 import { getSubtypeBySlug } from "./lib/taxonomy";
 import { computeChoropleth } from "./lib/choropleth";
+
+type View = "map" | "table";
 
 interface ManifestCategory {
   slug: string;
@@ -56,6 +59,18 @@ interface RegionMeta {
   countsByMuni: Map<string, number>;
 }
 
+/**
+ * Metadata about a focused (single-muni) query. Same two-phase shape as
+ * RegionMeta — `renderable=false` means we had too many features to
+ * return a payload (e.g. Boston + all-buildings → ~180k), so the UI
+ * falls back to a count-only view with a download affordance.
+ */
+interface FocusedMeta {
+  total: number;
+  renderable: boolean;
+  threshold: number;
+}
+
 function App() {
   // User-facing selections.
   const [selectedSubtypeSlug, setSelectedSubtypeSlug] = useState<string | null>(
@@ -72,9 +87,30 @@ function App() {
     GeoJSON.FeatureCollection<GeoJSON.Geometry> | null
   >(null);
   const [regionMeta, setRegionMeta] = useState<RegionMeta | null>(null);
+  const [focusedMeta, setFocusedMeta] = useState<FocusedMeta | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // Slice 5 — view + scope + choropleth toggle state.
+  //
+  // view:                   Map vs Table tab.
+  // choroplethEnabled:      user-facing switch inside the legend. null means
+  //                         "use the default for the current query shape";
+  //                         a boolean means the user overrode it.
+  // tableScopeOverride:     likewise for the Table's feature/muni scope.
+  //                         null = follow choropleth state; boolean = explicit.
+  //
+  // The override-null-means-follow-default pattern is what makes the UI feel
+  // continuous: if the user never clicks the toggles, the defaults track the
+  // query shape. Once they click, their choice sticks through subsequent
+  // queries until they reset it (happens automatically when the selection
+  // changes — see the useEffect below).
+  const [view, setView] = useState<View>("map");
+  const [choroplethOverride, setChoroplethOverride] =
+    useState<boolean | null>(null);
+  const [tableScopeOverride, setTableScopeOverride] =
+    useState<TableScope | null>(null);
 
   // Load manifest categories + muni list once on mount.
   useEffect(() => {
@@ -116,8 +152,15 @@ function App() {
     const hadActiveQuery = results !== null || regionMeta !== null;
     setResults(null);
     setRegionMeta(null);
+    setFocusedMeta(null);
     setSelectedId(null);
     setError(null);
+    // Reset toggle overrides on selection change — each new query starts
+    // from the query-shape default (points under threshold, choropleth
+    // over threshold). If users want sticky preferences across queries
+    // we can revisit.
+    setChoroplethOverride(null);
+    setTableScopeOverride(null);
     if (hadActiveQuery && selectedSubtypeSlug && selectedMuniSlug) {
       void handleFind();
     }
@@ -144,13 +187,19 @@ function App() {
           cap: res.cap,
           countsByMuni: res.countsByMuni,
         });
+        setFocusedMeta(null);
       } else {
-        const fc = await findFeaturesInMuni(
+        const res = await findFeaturesInMuni(
           selectedSubtypeSlug,
           selectedMuniSlug,
         );
-        setResults(fc);
+        setResults(res.fc);
         setRegionMeta(null);
+        setFocusedMeta({
+          total: res.totalCount,
+          renderable: res.renderable,
+          threshold: res.threshold,
+        });
       }
     } catch (e) {
       console.error(e);
@@ -208,17 +257,47 @@ function App() {
    *  focus paint, no fit-bounds-to-muni. Pass null to opt out of those. */
   const mapMuniSlug = isRegion ? null : selectedMuniSlug;
 
-  // Choropleth: only in region mode, only after a region query has run.
-  // Focused mode must pass null so the muni-fill reverts to the
-  // neighbor-dim post-selection style. Bins are recomputed whenever
+  // Choropleth bins: only in region mode, only after a region query has
+  // run. Focused mode passes null to MapView so the muni-fill reverts to
+  // the neighbor-dim post-selection style. Bins are recomputed whenever
   // the count map changes — cheap (101 values, O(n log n)).
-  const choropleth = useMemo(() => {
+  const choroplethData = useMemo(() => {
     if (!isRegion || !regionMeta) return null;
     return {
       counts: regionMeta.countsByMuni,
       bins: computeChoropleth(regionMeta.countsByMuni),
     };
   }, [isRegion, regionMeta]);
+
+  // Default-on-when-over-threshold, default-off-when-under-threshold.
+  // Rationale: under threshold the points are the useful render; over
+  // threshold the points would be noise so the choropleth is the answer.
+  // User can override with the legend checkbox — the override sticks
+  // for the current query.
+  const defaultChoroplethEnabled = Boolean(
+    choroplethData && regionMeta && !regionMeta.renderable,
+  );
+  const choroplethEnabled =
+    choroplethOverride ?? defaultChoroplethEnabled;
+
+  // Table scope default tracks the choropleth toggle (they're two views
+  // of the same "muni-scale vs feature-scale" decision). When a region
+  // query has no renderable features AND choropleth is off, we still
+  // default to "muni" because there's nothing to show at feature scope.
+  const canToggleTableScope =
+    isRegion && regionMeta !== null && regionMeta.renderable;
+  const defaultTableScope: TableScope = choroplethEnabled
+    ? "muni"
+    : regionMeta && !regionMeta.renderable
+      ? "muni" // no renderable features to show anyway
+      : "feature";
+  const tableScope: TableScope =
+    tableScopeOverride ?? defaultTableScope;
+
+  // MapView only paints the choropleth when enabled. When disabled,
+  // passing null reverts to the pre-selection / post-selection fill,
+  // which in region mode is the ambient neutral fill.
+  const mapChoropleth = choroplethEnabled ? choroplethData : null;
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col">
@@ -270,9 +349,25 @@ function App() {
               >
                 {loading ? "Finding…" : "Find data →"}
               </button>
-              <div className="text-sm text-slate-500 flex items-center gap-3 ml-2">
+              <div className="text-sm text-slate-500 flex flex-wrap items-center gap-x-3 gap-y-1 ml-2">
                 {error ? (
                   <span className="text-red-600">Error: {error}</span>
+                ) : focusedMeta && !focusedMeta.renderable ? (
+                  // Over the focused threshold: too many to render as points
+                  // or as table rows. Count only — mirrors the region
+                  // over-threshold UX.
+                  <>
+                    <span>
+                      <strong>
+                        {focusedMeta.total.toLocaleString()}
+                      </strong>{" "}
+                      {selectedSubtype?.label.toLowerCase() ?? "features"} in
+                      the MAPC extract match this filter —{" "}
+                      <span className="text-slate-400">
+                        too many to render individually.
+                      </span>
+                    </span>
+                  </>
                 ) : results ? (
                   <>
                     <span>
@@ -420,33 +515,83 @@ function App() {
         )}
 
         <section className="max-w-6xl mx-auto px-6 pb-20">
-          <div
-            className={
-              "relative transition-[height] duration-300 " +
-              (focused ? "h-[720px]" : "h-[540px]")
-            }
-          >
-            <MapView
-              results={results}
-              selectedId={selectedId}
-              onSelectFeature={setSelectedId}
-              selectedMuniSlug={mapMuniSlug}
-              onSelectMuni={setSelectedMuniSlug}
-              choropleth={choropleth}
+          {/* Map / Table tabs. Shown once a subtype is picked (or a query
+              has run) so the tab chrome doesn't clutter the empty state. */}
+          <div className="flex items-center border-b border-slate-200 mb-3">
+            <ViewTab
+              label="Map"
+              active={view === "map"}
+              onClick={() => setView("map")}
             />
-            {choropleth && selectedSubtype && (
-              <ChoroplethLegend
-                bins={choropleth.bins}
-                subtypeLabel={selectedSubtype.label}
-              />
-            )}
-            {selectedFeature && (
-              <DetailPanel
-                feature={selectedFeature}
-                onClose={() => setSelectedId(null)}
-              />
+            <ViewTab
+              label="Table"
+              active={view === "table"}
+              onClick={() => setView("table")}
+            />
+            {view === "map" && regionMeta && !regionMeta.renderable &&
+              !choroplethEnabled && (
+                <span className="ml-auto text-xs text-slate-500 italic pr-2">
+                  Choropleth off — {regionMeta.total.toLocaleString()}{" "}
+                  {selectedSubtype?.label.toLowerCase() ?? "features"} can't
+                  be drawn as points. Toggle it back on, or switch to the
+                  Table tab.
+                </span>
+              )}
+            {focusedMeta && !focusedMeta.renderable && (
+              <span className="ml-auto text-xs text-slate-500 italic pr-2">
+                {focusedMeta.total.toLocaleString()}{" "}
+                {selectedSubtype?.label.toLowerCase() ?? "features"} is past
+                the {focusedMeta.threshold.toLocaleString()} render cap —
+                neither the map nor the table can load individual rows.
+              </span>
             )}
           </div>
+
+          {view === "map" ? (
+            <div
+              className={
+                "relative transition-[height] duration-300 " +
+                (focused ? "h-[720px]" : "h-[540px]")
+              }
+            >
+              <MapView
+                results={results}
+                selectedId={selectedId}
+                onSelectFeature={setSelectedId}
+                selectedMuniSlug={mapMuniSlug}
+                onSelectMuni={setSelectedMuniSlug}
+                choropleth={mapChoropleth}
+              />
+              {choroplethData && selectedSubtype && (
+                <ChoroplethLegend
+                  bins={choroplethData.bins}
+                  subtypeLabel={selectedSubtype.label}
+                  enabled={choroplethEnabled}
+                  onToggle={(v) => setChoroplethOverride(v)}
+                />
+              )}
+              {selectedFeature && (
+                <DetailPanel
+                  feature={selectedFeature}
+                  onClose={() => setSelectedId(null)}
+                />
+              )}
+            </div>
+          ) : (
+            <TableView
+              features={results ? (results.features as ResultFeature[]) : null}
+              countsByMuni={regionMeta?.countsByMuni ?? null}
+              munis={munis}
+              categorySlug={selectedSubtype?.categorySlug ?? null}
+              subtypeLabel={selectedSubtype?.label ?? null}
+              selectedId={selectedId}
+              onSelectFeature={setSelectedId}
+              onSelectMuni={setSelectedMuniSlug}
+              scope={tableScope}
+              onScopeChange={(s) => setTableScopeOverride(s)}
+              canToggleScope={canToggleTableScope}
+            />
+          )}
         </section>
       </main>
 
@@ -468,6 +613,28 @@ function App() {
         </div>
       </footer>
     </div>
+  );
+}
+
+function ViewTab(props: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  const { label, active, onClick } = props;
+  return (
+    <button
+      onClick={onClick}
+      aria-pressed={active}
+      className={
+        "px-4 py-2 text-sm border-b-2 -mb-px transition-colors cursor-pointer " +
+        (active
+          ? "border-sky-600 text-slate-900 font-medium"
+          : "border-transparent text-slate-500 hover:text-slate-900")
+      }
+    >
+      {label}
+    </button>
   );
 }
 

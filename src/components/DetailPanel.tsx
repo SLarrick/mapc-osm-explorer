@@ -11,7 +11,7 @@ interface DetailPanelProps {
 }
 
 export function DetailPanel({ feature, onClose }: DetailPanelProps) {
-  const { name, osm_id, osm_type, tags } = feature.properties;
+  const { name, osm_id, osm_type, tags, muni_name } = feature.properties;
   const osmUrl = `https://www.openstreetmap.org/${osm_type}/${osm_id}`;
   const tagEntries = Object.entries(tags).sort(([a], [b]) => a.localeCompare(b));
 
@@ -41,6 +41,12 @@ export function DetailPanel({ feature, onClose }: DetailPanelProps) {
           <p className="text-xs text-slate-500 mt-0.5">
             OSM {osm_type}{" "}
             <span className="font-mono text-slate-400">{osm_id}</span>
+            {muni_name ? (
+              <>
+                {" · "}
+                <span className="text-slate-500">{muni_name}</span>
+              </>
+            ) : null}
           </p>
         </div>
         <button
