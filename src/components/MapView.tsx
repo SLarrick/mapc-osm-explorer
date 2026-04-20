@@ -49,6 +49,11 @@ interface MapViewProps {
     counts: Map<string, number>;
     bins: ChoroplethBins;
   } | null;
+  /** Muni slugs to highlight with a bolder accent outline. Used for the
+   *  legend's bin-click "show me which munis are in this bin" affordance.
+   *  Layered above the selection outline, distinct color so selection
+   *  vs bin-highlight are visually separate. */
+  highlightedMuniSlugs?: string[];
 }
 
 // Layer ids we hit-test for the hover tooltip. The circle layer rides the
@@ -177,6 +182,7 @@ export function MapView({
   selectedMuniSlug,
   onSelectMuni,
   choropleth,
+  highlightedMuniSlugs,
 }: MapViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -199,6 +205,11 @@ export function MapView({
   // before the map has finished loading).
   const choroplethRef = useRef<typeof choropleth>(choropleth ?? null);
   choroplethRef.current = choropleth ?? null;
+
+  // Same pattern for bin-highlight slugs so the map-load handler can
+  // apply an initial highlight if one was set before map was ready.
+  const highlightedMuniSlugsRef = useRef<string[]>(highlightedMuniSlugs ?? []);
+  highlightedMuniSlugsRef.current = highlightedMuniSlugs ?? [];
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -317,6 +328,22 @@ export function MapView({
         },
       });
 
+      // Bin-highlight outline — the legend's "show me which munis are in
+      // this bin" affordance. Sky-600 accent so it's visually distinct
+      // from the slate-900 selection outline. Filter starts empty,
+      // gets set from the highlightedMuniSlugs prop.
+      map.addLayer({
+        id: "munis-bin-highlight-outline",
+        type: "line",
+        source: "mapc-munis",
+        filter: ["in", ["get", "slug"], ["literal", []]],
+        paint: {
+          "line-color": "#0284c7", // sky-600
+          "line-width": 2.25,
+          "line-opacity": 0.95,
+        },
+      });
+
       // Muni hover highlight
       let hoveredId: string | number | null = null;
       map.on("mousemove", "munis-fill", (e) => {
@@ -404,6 +431,7 @@ export function MapView({
         selectedMuniSlugRef.current,
         choroplethRef.current,
       );
+      applyBinHighlight(map, highlightedMuniSlugsRef.current);
     });
 
     return () => {
@@ -464,6 +492,13 @@ export function MapView({
     );
     applyMuniFillPaint(map, selectedMuniSlugRef.current, choropleth ?? null);
   }, [choropleth]);
+
+  // Sync highlightedMuniSlugs prop → bin-highlight outline filter.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReadyRef.current) return;
+    applyBinHighlight(map, highlightedMuniSlugs ?? []);
+  }, [highlightedMuniSlugs]);
 
   return (
     <div
@@ -547,6 +582,19 @@ function applyMuniFillPaint(
   }
   map.setPaintProperty("munis-fill", "fill-color", paint.color);
   map.setPaintProperty("munis-fill", "fill-opacity", paint.opacity);
+}
+
+/**
+ * Update the bin-highlight outline filter to match the given slug list.
+ * Empty list → filter matches nothing.
+ */
+function applyBinHighlight(map: maplibregl.Map, slugs: string[]): void {
+  if (!map.getLayer("munis-bin-highlight-outline")) return;
+  map.setFilter("munis-bin-highlight-outline", [
+    "in",
+    ["get", "slug"],
+    ["literal", slugs],
+  ]);
 }
 
 /**

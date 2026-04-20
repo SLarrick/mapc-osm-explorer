@@ -111,3 +111,50 @@ export function binRangeLabel(
   if (lo >= hi) return fmt(hi);
   return `${fmt(lo)} – ${fmt(hi)}`;
 }
+
+/**
+ * Which bin a given count falls in — matches the MapLibre step
+ * expression. Bin -1 means count === 0 (gets the zero color).
+ */
+export function binForCount(count: number, bins: ChoroplethBins): number {
+  if (count === 0) return -1;
+  for (let i = 0; i < 5; i++) {
+    if (count <= bins.stops[i]) return i;
+  }
+  return 5;
+}
+
+/**
+ * Group muni slugs by their bin index (0-5). Does not include bin -1
+ * (zero-count munis); callers usually show "0" as a separate row.
+ * Returns an array indexed by bin, each entry sorted alphabetically
+ * by muni name.
+ */
+export function groupMunisByBin(
+  counts: Map<string, number>,
+  muniNameBySlug: Map<string, string>,
+  bins: ChoroplethBins,
+): Array<Array<{ slug: string; name: string; count: number }>> {
+  const out: Array<Array<{ slug: string; name: string; count: number }>> = [
+    [], [], [], [], [], [],
+  ];
+  for (const [slug, count] of counts) {
+    const b = binForCount(count, bins);
+    if (b < 0) continue;
+    out[b].push({
+      slug,
+      name: muniNameBySlug.get(slug) ?? slug,
+      count,
+    });
+  }
+  for (const group of out) group.sort((a, b) => a.name.localeCompare(b.name));
+  return out;
+}
+
+/** Count of zero-count munis in a choropleth. */
+export function countZeroMunis(counts: Map<string, number>): number {
+  let n = 0;
+  for (const v of counts.values()) if (v === 0) n++;
+  return n;
+}
+

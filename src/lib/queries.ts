@@ -36,6 +36,11 @@ export interface ResultFeature extends GeoJSON.Feature<GeoJSON.Geometry> {
      *  MAPC, but we tolerate it). */
     muni_slug: string | null;
     muni_name: string | null;
+    /** bbox-centroid of the geometry in WGS84. Cheap representative
+     *  point used by the CSV export and available as a column-chooser
+     *  column in the table. Computed at parse time — see wkb.ts. */
+    centroid_lon: number;
+    centroid_lat: number;
   };
 }
 
@@ -183,6 +188,8 @@ async function findFeaturesInMuniBy(
         tags: parsedTags,
         muni_slug: muniSlug,
         muni_name: muniName,
+        centroid_lon: parsed.center[0],
+        centroid_lat: parsed.center[1],
       },
     });
   }
@@ -380,6 +387,8 @@ export async function findFeaturesInRegion(
         tags: parsedTags,
         muni_slug: hit?.slug ?? null,
         muni_name: hit?.name ?? null,
+        centroid_lon: parsed.center[0],
+        centroid_lat: parsed.center[1],
       },
     });
   }

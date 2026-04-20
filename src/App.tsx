@@ -33,7 +33,7 @@ import {
 } from "./lib/queries";
 import { listMunicipalities, type MuniSummary } from "./lib/geo";
 import { getSubtypeBySlug } from "./lib/taxonomy";
-import { computeChoropleth } from "./lib/choropleth";
+import { computeChoropleth, groupMunisByBin } from "./lib/choropleth";
 
 type View = "map" | "table";
 
@@ -111,6 +111,15 @@ function App() {
     useState<boolean | null>(null);
   const [tableScopeOverride, setTableScopeOverride] =
     useState<TableScope | null>(null);
+  // Slice 5.1 — region-layers toggles + bin highlight.
+  //
+  // pointsOverride:  null = follow query-shape default (on when renderable,
+  //                  off when over the region-render threshold). User toggle
+  //                  in the legend's "Show as points" checkbox overrides.
+  // activeBin:       which choropleth bin (0-5) the user clicked in the
+  //                  legend to expand + highlight on the map. null = none.
+  const [pointsOverride, setPointsOverride] = useState<boolean | null>(null);
+  const [activeBin, setActiveBin] = useState<number | null>(null);
 
   // Load manifest categories + muni list once on mount.
   useEffect(() => {
@@ -161,6 +170,8 @@ function App() {
     // we can revisit.
     setChoroplethOverride(null);
     setTableScopeOverride(null);
+    setPointsOverride(null);
+    setActiveBin(null);
     if (hadActiveQuery && selectedSubtypeSlug && selectedMuniSlug) {
       void handleFind();
     }
@@ -298,6 +309,42 @@ function App() {
   // passing null reverts to the pre-selection / post-selection fill,
   // which in region mode is the ambient neutral fill.
   const mapChoropleth = choroplethEnabled ? choroplethData : null;
+
+  // Points-on-map state.
+  //
+  // In region mode: the query-shape default is "off when over render
+  // threshold, on otherwise." The user can override in the legend — we
+  // keep that override until the selection changes.
+  //
+  // Outside region mode (focused or landing), points default to on and
+  // the legend toggle isn't exposed.
+  const defaultPointsEnabled = isRegion
+    ? Boolean(regionMeta && regionMeta.renderable)
+    : true;
+  const pointsEnabled = pointsOverride ?? defaultPointsEnabled;
+
+  // The map only draws the results overlay when points are enabled. When
+  // off, we pass null so the circle / fill / line layers go empty.
+  const mapResults = pointsEnabled ? results : null;
+
+  // Slug → name lookup for the legend's expanded muni list + map tooltips.
+  const muniNameBySlug = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const muni of munis) m.set(muni.slug, muni.name);
+    return m;
+  }, [munis]);
+
+  // When a bin is active, compute the slugs of munis in that bin so the
+  // MapView can outline them and the Legend can list them.
+  const highlightedMuniSlugs = useMemo(() => {
+    if (activeBin === null || !choroplethData) return [];
+    const grouped = groupMunisByBin(
+      choroplethData.counts,
+      muniNameBySlug,
+      choroplethData.bins,
+    );
+    return grouped[activeBin]?.map((m) => m.slug) ?? [];
+  }, [activeBin, choroplethData, muniNameBySlug]);
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col">
@@ -555,19 +602,27 @@ function App() {
               }
             >
               <MapView
-                results={results}
+                results={mapResults}
                 selectedId={selectedId}
                 onSelectFeature={setSelectedId}
                 selectedMuniSlug={mapMuniSlug}
                 onSelectMuni={setSelectedMuniSlug}
                 choropleth={mapChoropleth}
+                highlightedMuniSlugs={highlightedMuniSlugs}
               />
               {choroplethData && selectedSubtype && (
                 <ChoroplethLegend
                   bins={choroplethData.bins}
                   subtypeLabel={selectedSubtype.label}
-                  enabled={choroplethEnabled}
-                  onToggle={(v) => setChoroplethOverride(v)}
+                  counts={choroplethData.counts}
+                  muniNameBySlug={muniNameBySlug}
+                  pointsEnabled={pointsEnabled}
+                  onTogglePoints={(v) => setPointsOverride(v)}
+                  choroplethEnabled={choroplethEnabled}
+                  onToggleChoropleth={(v) => setChoroplethOverride(v)}
+                  activeBin={activeBin}
+                  onBinSelect={setActiveBin}
+                  onSelectMuni={setSelectedMuniSlug}
                 />
               )}
               {selectedFeature && (
