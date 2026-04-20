@@ -331,8 +331,8 @@ function App() {
                       across the MAPC region.
                     </span>
                     <span className="text-slate-400">
-                      At this scale a point map isn&apos;t useful — pick a
-                      muni to see them on the map. Aggregated region-wide
+                      At this scale a full render isn&apos;t useful — pick
+                      a muni to see them on the map. Aggregated region-wide
                       views are coming in the next slice.
                     </span>
                   </>

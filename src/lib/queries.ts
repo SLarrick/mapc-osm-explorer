@@ -145,20 +145,29 @@ export interface RegionResult {
 
 /**
  * Maximum total count at which we'll render the raw geometries on the
- * map. Above this, a point map is too dense to be informative at MAPC-
- * region zoom — Somerville + Cambridge become a blob — so we show the
- * count only and point the user at a muni for the map view. Slice 4A
- * (muni-choropleth) and 4B (hex density) will replace this hard cutoff
- * with real aggregated renders for high-N features.
+ * map. Above this, a full render is too dense to be informative at
+ * MAPC-region zoom — Somerville + Cambridge become a blob — so we show
+ * the count only and point the user at a muni for the map view. Slice
+ * 4A (muni-choropleth) and 4B (hex density) will replace this hard
+ * cutoff with real aggregated renders for high-N features.
+ *
+ * 25k was chosen after measuring real counts per subtype (see ETL audit
+ * 2026-04): it covers every subtype the user flagged as "useful at
+ * region scale" — bus-stops (~8.5k), parks (~5k), sports-fields
+ * (~6.3k), bike-paths (~3.7k), water-bodies (~5.6k), forests (~2.4k),
+ * wetlands (~14.4k), trails (~24.3k) — while keeping noisy high-N
+ * types (trees 34k, residential-streets 59k, footpaths 123k,
+ * all-buildings 1M) on the count-only path.
  */
-export const REGION_RENDER_THRESHOLD = 2000;
+export const REGION_RENDER_THRESHOLD = 25_000;
 
 /**
  * Per-call cap on the number of features fetched when we *do* render.
- * Set well above REGION_RENDER_THRESHOLD so it only kicks in for edge
- * cases; the threshold is the primary gate.
+ * Set just above REGION_RENDER_THRESHOLD so it only kicks in for edge
+ * cases where COUNT slightly underestimates post-filter row count.
+ * The threshold is the primary gate.
  */
-export const REGION_RENDER_CAP = 5000;
+export const REGION_RENDER_CAP = 30_000;
 
 /**
  * Find all OSM features matching a curated subtype across the entire

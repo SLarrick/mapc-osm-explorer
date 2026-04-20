@@ -237,9 +237,12 @@ export const SUBTYPES: Subtype[] = [
     completeness: "spotty",
   },
   {
+    // amenity=bicycle_parking lives in the active-transportation parquet
+    // (3683 rows), not streetscape (0 rows) — the ETL bundles it with
+    // other bike-network infrastructure. Confirmed by audit 2026-04.
     slug: "bike-parking",
     label: "Bike parking",
-    categorySlug: "streetscape",
+    categorySlug: "active-transportation",
     filter: { kind: "eq", key: "amenity", values: ["bicycle_parking"] },
     completeness: "spotty",
   },
