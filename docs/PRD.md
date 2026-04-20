@@ -1,7 +1,7 @@
 # PRD: MAPC OSM Explorer
 
 **Status:** Living document. Supersedes `OSM-Explorer_PRD.docx` (April 18, 2026).
-**Last updated:** 2026-04-19
+**Last updated:** 2026-04-20
 **Repo:** [mapc-osm-explorer](https://github.com/SLarrick/mapc-osm-explorer)
 
 ---
@@ -19,7 +19,15 @@ This document replaces the original April 18 PRD. Key shifts since then, all cap
 - **Selection model:** MapLibre `feature-state` drives selection coloring; `promoteId: "uid"` gives stable per-feature ids (`"way/12345"`) usable across the whole app.
 - **Completeness becomes first-class.** The original PRD mentioned fill-rate badges in the table view as a nicety. After design review (see §9) we now treat completeness — both tag-level fill rate *and* feature-level OSM coverage per muni — as a primary signal, not a caveat. This informs the regional-view design.
 - **Regional view (in design):** The original PRD's muni-choropleth-when-geography-is-MAPC-wide is being reshaped into a more nuanced plan driven by completeness tier + feature count + the distinction between "discrete facilities" (muni-binnable) and "continuous phenomena" (hex-binnable). Details in §10 and §11.
-- **Build status:** Slices 1, 1b, 1c, and 2 are shipped. Slice 3 is "Regional view, v1." Originally-planned Slice 3 scope (summary stats, choropleth polish, about page) is pushed to Slice 4+.
+- **Build status (as of 2026-04-20):** Slices 0, 1, 1b, 1c, 2, 3, 3.5, 3.5.1, 4, 5, and 5.1 are shipped. See §5 for details.
+- **Roadmap reshape (Slice 5-era):**
+  - **Slice 4B (hex density) skipped for v1.** The Slice 4A muni choropleth plus the per-feature pin cap covers enough of the "continuous phenomena" question for a first release. Hex density is deferred to post-v1.
+  - **URL state promoted to pre-v1.** Sharable `?feature=…&muni=…` URLs are a core planner use case (send the map of Salem playgrounds to a colleague), too important to ship v1 without.
+  - **CSV export absorbed into Slice 5.1** (tabular data wants CSV, not a later slice).
+  - **Normalization (e.g. feature-per-1000-people, per-mile-of-road) moved explicitly post-v1.** A reliable denominator dataset is its own lift.
+- **Tabular view formalized (Slice 5).** Two scopes — one row per feature (with curated per-category columns + a column chooser with fill-rate badges) and one row per municipality. Municipality is a standard feature-scope column, computed client-side via PIP because OSM itself doesn't carry a muni tag. Default scope tracks the choropleth toggle: when shading munis is the right answer on the map, muni rows are the right answer in the table.
+- **Over-threshold two-phase query pattern.** Both region (25k cap) and focused single-muni (50k cap) queries COUNT first and skip the geometry payload when over-threshold. The UI falls back to an honest "N features — too many to render individually" message rather than silently truncating. Boston + all-buildings (~180k) was the forcing function.
+- **Region layers legend.** The choropleth legend evolved into a "Region layers" card with two toggles (show features as points; shade munis by count), per-bin muni counts, and click-to-expand listing of the munis in each bin (sorted by count desc) with a sky-600 outline highlight on the map.
 
 ---
 
@@ -61,11 +69,12 @@ Explicitly out of scope:
 - Editing / writing back to OSM.
 - Non-OSM data sources (Census, MassGIS, GTFS) — reserved for v2.
 - Subregions, census tracts as geographies — v1.5.
-- Saved queries, user accounts, sharing via URL-state — nice-to-have, defer.
+- Saved queries, user accounts — post-v1. (URL-state sharing is now **in scope** for v1; see §11 Slice 6.)
 - Natural-language search — v2+.
 - Mobile/tablet layout — desktop-first.
-- Advanced spatial operations beyond boundary clip + muni-binned / hex-binned aggregation — v2.
+- Advanced spatial operations beyond boundary clip + muni-binned aggregation — v2. (Hex-binned density was scoped for v1 as Slice 4B and is now deferred to post-v1.)
 - Live Overpass queries — v1 uses a periodically refreshed snapshot.
+- **Normalization** (features per 1,000 residents, per mile of road, per acre) — post-v1. A defensible denominator dataset is its own lift; v1 ships descriptive counts only.
 
 ## 5. What's Built Today
 
@@ -96,6 +105,43 @@ DuckDB-WASM queries a category parquet over HTTP range requests. Point-in-polygo
 - **Click priority:** result feature > muni polygon > empty space (deselects).
 
 See `src/lib/taxonomy.ts` for the current subtype list.
+
+### Slice 3 — Region-wide queries + completeness tiers
+- `"Entire MAPC region"` option at the top of the muni dropdown (visually separated from sub-region groups).
+- `findFeaturesInRegion(subtypeSlug)` queries the whole category parquet. Two-phase shape: always COUNT first; only fetch the geometry payload if the count is under the region-render threshold.
+- Initial cap of 5,000 features with a "Showing N of M" note.
+- `completeness: "high" | "partial" | "spotty"` added to each Subtype. Spotty-tier features surface a pre-query "OSM coverage is uneven" caveat at region scale.
+- MA state boundary added as a reference line (dashed slate-500) so the MAPC footprint reads in its geographic context.
+
+### Slice 3.5 — Truth-check pass
+After shipping Slice 3 the data was spot-checked against MassGIS / local knowledge. Adjustments included filter corrections for several subtypes where the initial taxonomy was too broad or too narrow (e.g. bike parking), and tightening of the muni-assignment PIP edge cases.
+
+### Slice 3.5.1 — Raise region render threshold
+Real traffic numbers from Slice 3 showed that the 5,000-feature cap was conservative for how much MapLibre actually handles cleanly. The threshold was raised to 25,000 for region queries. Features above that fall into the count-only "too many to render as points" path.
+
+### Slice 4 — Muni-count choropleth (region mode)
+- DuckDB-side `SELECT count(*) GROUP BY muni_slug`-style aggregation wired through `findFeaturesInRegion`. Per-muni counts live in `regionMeta.countsByMuni`.
+- `src/lib/choropleth.ts` computes 5 quantile bins over *non-zero* counts (so Boston doesn't collapse everyone else into bin 1) plus a separate neutral color for muni count = 0 ("mapped and zero" vs. "no data").
+- Fill applied via a MapLibre `step` expression on `feature-state.count`; paint expression swapped in/out based on selection state.
+- `ChoroplethLegend` shows bin swatches + ranges. Sky-blue sequential ramp matches the rest of the app's primary palette.
+- ETL gained explicit relation handling (`osmium export`) so area features like parks and water bodies render fully rather than as unstitched ways.
+
+### Slice 5 — Tabular view
+- TanStack Table + TanStack React Virtual, virtualized so 25k feature-rows scroll smoothly.
+- Two scopes driven by a segmented control: **By feature** (one row per feature) and **By municipality** (one row per MAPC muni with per-muni count, available only when a region query is active). Scope default tracks the map's choropleth toggle — muni scope when shading is on, feature scope when it's off.
+- **Curated default columns per category** in `src/lib/tableColumns.ts` — hand-coded, deterministic, auditable in one file. Not an AI-magic derivation. For each of the 12 categories a small ordered list of the tag keys planners actually care about (e.g. parks → `leisure, access, surface, wheelchair, opening_hours, lit, operator`).
+- **Column chooser** lists every tag key in the current result set, sorted by fill rate, with a search box and "Reset to defaults" affordance. A "hide columns below X%" slider trims low-fill columns.
+- **Fill-rate badges** on each tag column header — green ≥75%, amber 30–75%, rose <30%. Scoped to the *current* result set, not global (the question is "of Salem's playgrounds…," not "across MAPC").
+- **Municipality as a standard feature-scope column.** OSM features don't carry a muni identifier, so each `ResultFeature` is stamped client-side via PIP against the already-loaded muni boundaries. See `assignMuni` in `src/lib/queries.ts`.
+- **Row click ↔ map selection** — clicking a feature row selects it in MapLibre; clicking a muni row in muni-scope enters focused mode.
+- **Over-threshold focused queries.** A single muni above the 50,000-feature focused cap (Boston + all buildings, ~180k) now returns metadata only, avoiding a browser OOM. The UI renders a count-and-honest-message panel rather than attempting a partial payload.
+
+### Slice 5.1 — Region-layers polish + CSV export
+- Legend restructured to a **"Region layers — \<subtype\>"** card with two checkboxes — *Show as points* (toggles the feature overlay) and *Shade munis by count* (toggles the choropleth) — plus the bin legend itself. Disabling points is the correct move whenever the dot cloud is dense enough to occlude the choropleth (region-wide parks is the canonical case).
+- **Per-bin muni counts** on every legend row. Clicking a bin expands a scrollable list of munis in that bin (sorted by count descending, alphabetical tie-break) and outlines those munis on the map in a new sky-600 highlight layer, distinct from the slate-900 selection outline.
+- **CSV export** from the table view. Feature scope writes one row per feature with `name, municipality, osm_type, osm_id, geometry_type, centroid_lon, centroid_lat, geometry_geojson`, and one `tag:<key>` column for every tag key in the set. Muni scope writes one row per MAPC muni with the per-muni count, sorted count-desc.
+- `centroid_lon` / `centroid_lat` are computed at WKB parse time and stamped onto every `ResultFeature` — available to the CSV and future column-chooser entries without re-walking the geometry.
+- Buildings parquet was re-simplified in-place (tolerance 0.00001 → 0.00003, ≈3m) after the centroid columns pushed the file past GitHub's 100 MB limit. Visual fidelity at neighborhood zoom is unchanged; file went 112 → 88 MB.
 
 ## 6. Data Architecture (as-built)
 
@@ -138,8 +184,10 @@ Every per-category parquet has the same columns:
 ### 6.3 Runtime
 - User lands → DuckDB-WASM initializes (1–2s first load, cached after).
 - User picks subtype + geography → app opens the category parquet at `/data/<category-slug>.parquet` via HTTP range-read, runs `SELECT … WHERE <tag filter>`.
-- Results are decoded client-side (WKB → GeoJSON geometry) and passed to MapLibre via a `GeoJSONSource`.
-- Muni filter is currently done in JS (ray-cast point-in-polygon on each result's centroid). Will migrate to DuckDB spatial extension (`ST_Intersects`) when we need polygon-polygon intersection or sub-muni geographies.
+- Results are decoded client-side (WKB → GeoJSON geometry) and passed to MapLibre via a `GeoJSONSource`. The WKB parser also emits a bbox-centroid so downstream consumers (CSV export, muni assignment, future table columns) don't re-walk the geometry.
+- Muni *filter* (focused mode) and muni *stamping* (region mode, so every feature gets a `muni_slug` / `muni_name` on its properties) are done in JS via ray-cast point-in-polygon with a bbox pre-filter. This is why Municipality can appear as a standard column in the feature-scope table even though OSM itself doesn't carry a muni tag.
+- Will migrate to DuckDB spatial extension (`ST_Intersects`) when we need polygon-polygon intersection or sub-muni geographies.
+- Two-phase query pattern for over-threshold results: region queries COUNT up-front and skip the geometry fetch above the 25,000-feature render threshold; focused single-muni queries do the same above 50,000. Callers get a `{fc, totalCount, renderable, threshold}` shape and the UI switches to a count-only presentation.
 
 ### 6.4 Why this works
 - **Zero backend.** Deploy = `git push`. $0 on Vercel free tier.
@@ -212,13 +260,24 @@ Floating overlay (top-left of the map, on a selected feature):
 - "Download this feature" button.
 - Close (×).
 
-### 8.6 Planned UX (not yet built)
-- **Regional view** (Slice 3, see §11).
-- **Table tab** — TanStack Table, columns sorted by fill rate, fill-rate badges on each column header, column chooser, "show only columns with ≥20% data" toggle, filters cross-view with map.
+### 8.6 Regional view (shipped, Slices 3–5.1)
+- Landing-style layout. Picking "Entire MAPC region" runs a region-wide query without entering focused mode.
+- When the count is under threshold: feature overlay plus a muni choropleth tinted by per-muni count.
+- When the count is over threshold: choropleth-only; honest "N features — too many to render individually" note.
+- Spotty-tier features surface a pre-query "OSM coverage is uneven" caveat so the user frames the result as "where mapping has happened" rather than "where the thing exists."
+- **Region layers legend** (bottom-left of the map): points-on-map toggle, shade-munis-by-count toggle, bin swatches with per-bin muni counts, click-to-expand muni lists (sorted by count desc) with map highlight.
+
+### 8.7 Table view (shipped, Slice 5 + 5.1)
+- Map / Table tabs at the top of the results area. Both views share the same result set and selection state.
+- By-feature scope: one row per feature with curated default columns per category plus a column chooser (fill-rate-sorted, searchable, with green/amber/rose fill-rate badges). Row click selects the feature on the map.
+- By-muni scope: one row per MAPC muni with per-muni count, sorted count-desc by default. Row click enters focused mode for that muni.
+- Default scope tracks the choropleth toggle. User overrides stick until the query shape changes.
+- Download CSV button — writes feature rows (with `geometry_geojson` + centroid lat/lon) or muni rows depending on current scope.
+
+### 8.8 Planned UX (not yet built)
 - **Summary tab** — count, density, top-N values on the most-filled tags. Expanded per §9.
-- **CSV export.**
 - **About page.**
-- **URL state** — `?feature=…&muni=…` sharable URLs. The app's state model already supports this; just needs the query-string sync plumbing.
+- **URL state** — `?feature=…&muni=…` sharable URLs. The app's state model already supports this; just needs the query-string sync plumbing. Moved to in-scope for v1; see §11 Slice 6.
 
 ## 9. Completeness as First-Class Signal
 
@@ -253,7 +312,13 @@ Every regional view (and, eventually, every muni view too) should carry a subtle
 
 ## 10. Regional View — Design Principles
 
-The original PRD's "choropleth when geography = MAPC-wide" is being reshaped. Core principles from the Slice 2 design discussion:
+The original PRD's "choropleth when geography = MAPC-wide" was reshaped during Slice 2 design, then partially realized in Slices 3–5.1. What actually shipped:
+
+- Region queries always COUNT first. Under the 25k render threshold, raw features are drawn; over, the choropleth carries the answer alone.
+- Muni choropleth with a quantile-bin ramp applies to every subtype (not just discrete facilities). Users can toggle it off when the dot cloud is the more useful read.
+- Hex density (the "continuous phenomena" case from this section) was scoped out of v1 — see §11 "Skipped / deferred."
+
+Core principles from the original Slice 2 discussion, retained as guidance:
 
 ### 10.1 One size doesn't fit all features
 Region-scale rendering depends on two orthogonal properties of the feature type:
@@ -319,39 +384,31 @@ This matrix drives Slice 4+ rendering logic. For Slice 3 we ship with raw-only +
 - ✅ **Slice 1** — Playgrounds in Salem end-to-end.
 - ✅ **Slice 1b** — Real geometries + zoom-driven cross-fade.
 - ✅ **Slice 1c** — Click-to-inspect detail panel + GeoJSON export.
-- ✅ **Slice 2** — Curated subtype taxonomy, working dropdowns, muni focus UX (dim-others + bolder outline + camera flight), map-click-to-focus.
+- ✅ **Slice 2** — Curated subtype taxonomy, working dropdowns, muni focus UX.
+- ✅ **Slice 3** — Regional view v1: "Entire MAPC region" option, region-wide query with 5k render cap, completeness tiers, spotty-tier coverage caveat, MA state boundary reference line.
+- ✅ **Slice 3.5** — Truth-check pass: filter corrections across subtypes after spot-checking results.
+- ✅ **Slice 3.5.1** — Raise region render threshold to 25,000 based on observed MapLibre performance.
+- ✅ **Slice 4 (a.k.a. 4A)** — Muni-count choropleth with a quantile-bin sky-blue ramp, separate "no data" color, legend with bin ranges, ETL relation handling for area features.
+- ✅ **Slice 5** — Tabular view: TanStack Table + virtualization, two scopes (feature / muni), curated per-category columns, column chooser with fill-rate badges, hide-below-X% slider, Municipality as a standard feature column (PIP-stamped client-side), over-threshold count-only path for focused queries.
+- ✅ **Slice 5.1** — Region-layers polish + CSV export: "Region layers" card with points / choropleth toggles, per-bin muni counts + click-to-expand with map highlight, feature-scope CSV (with GeoJSON geometry + centroid lat/lon), muni-scope CSV.
 
-### Next up
-- **Slice 3 — Regional view, v1.** Ship the minimum viable "MAPC Region" experience, observe which feature types blow past the cap, use that data to design Slice 4+.
-  - Add `"Entire MAPC region"` as the top option in the muni dropdown (visually separated from the sub-region groups).
-  - Add `completeness: "high" | "partial" | "spotty"` field to `Subtype`. Hand-curated per §9.3.
-  - Selecting "MAPC Region" does *not* enter focus mode — stays in a landing-like layout (map at full 540px, hero sentence compacted slightly if needed).
-  - `findFeaturesInRegion(subtypeSlug)` skips the muni point-in-polygon filter. Capped at 5,000 features; if the total exceeds that, render the first 5,000 and show a note: *"Showing 5,000 of 34,812. Zoom in or pick a muni to see the rest."*
-  - Tier-3 features surface a gentle "OSM coverage is uneven for this feature — results reflect mapping effort as much as on-the-ground presence" note above the results.
-  - No choropleth, no hex binning, no density overlay — those come in Slice 4+.
-  - Instrumentation: log (to console for now) the total-vs-cap ratio per query so we have concrete numbers going into Slice 4.
+### Skipped / deferred
+- ⛔ **Slice 4B — Hex density.** Deferred to post-v1. Slice 4A's muni choropleth plus the render-cap + count-only path covers the "continuous phenomena" cases adequately for a first release. Hex binning warrants its own future slice if and when a real use case pushes for it.
 
-- **Slice 4A — Muni choropleth for discrete facilities.**
-  - DuckDB-side `SELECT count(*) GROUP BY muni_slug` aggregation for high/partial-tier discrete-facility subtypes.
-  - Render as a subtle tint on the existing muni-fill layer. Toggleable; pairs with raw features (always visible).
-  - Per-muni popup on hover in regional mode (e.g., "Salem: 15 playgrounds").
+### Next up (pre-v1)
+- **Slice 6 — URL state.** Sharable `?feature=<subtype>&muni=<slug>` URLs with two-way sync. Covers the "send this map to a colleague" use case. State model already supports it — wiring only. Also reset the view parameter (map / table) and table column selection to safe defaults on load, or encode those in the URL too (TBD).
+- **Slice 7 — Summary tab.** Count, density, top-N values for the most-filled tags. Per §9, this is where completeness becomes a first-class summary statistic, not just a column badge. Scope includes a headline number, a couple of charts, and a textual "N of the top 10 values cover X% of features" style summary.
+- **Slice 8 — About page + snapshot badge.** About copy (source, methodology, OSM attribution, completeness philosophy). Snapshot date wired from `_manifest.json` into the footer. Minimal polish pass on any rough edges before sharing the URL with 5–10 colleagues for validation.
 
-- **Slice 4B — Hex density for continuous phenomena.**
-  - DuckDB-side hex-bin aggregation (H3 via a DuckDB extension, or a hand-rolled lat/lng round for MVP).
-  - Render as a choropleth-style fill over the MAPC region.
-  - Scale hex size to zoom.
-  - Applies to high-N subtypes where the spatial pattern is the story (buildings, trees, paths).
+### Post-v1
+- **Advanced tag query mode** — power-user category + arbitrary tag filter UI. Sketch in §7.3.
+- **Hex density** (née Slice 4B) — as a dedicated slice if the use case materializes.
+- **Normalization** — per-capita, per-mile-of-road, per-acre. Requires a defensible denominator dataset.
+- **Sub-region geography** as a selectable unit (Inner Core, North Shore, etc.).
+- **Authoritative-source joins** (DESE school roster, DPH licensed-facility list) for ratio-to-truth completeness signals.
 
-- **Slice 5 — Table view.** TanStack Table, fill-rate column badges, column chooser, "only ≥N% filled" toggle, cross-view filtering.
-
-- **Slice 6 — Summary tab.** Count, density, top-N values for most-filled tags.
-
-- **Slice 7 — CSV export + About page + snapshot badge.**
-
-- **Slice 8 — Advanced tag query mode** (power-user escape hatch).
-
-### Rough time estimates
-Slice 3: 1–2 evenings. Slice 4A: 2 evenings. Slice 4B: 2–3 evenings (new territory). Slice 5: 2 evenings. Slice 6–7: 1–2 evenings each. Slice 8: scope TBD.
+### Rough time estimates (remaining)
+Slice 6: 1 evening. Slice 7: 2 evenings. Slice 8: 1 evening + writing time.
 
 ## 12. Tech Stack (as-built)
 
@@ -375,13 +432,14 @@ Updated from the original PRD:
 - [x] All 12 categories and all 101 municipalities are selectable. *(Slice 2)*
 - [x] Map click on a muni polygon commits the geographic selection. *(Slice 2)*
 - [x] OSM attribution visible; snapshot "TBD" placeholder in footer. *(Slice 0)*
-- [ ] MAPC-wide feature queries work. *(Slice 3)*
-- [ ] Regional view renders defensibly for at least one representative of each (low-N, mid-N, high-N) × (discrete, continuous) combination. *(Slice 3 baseline; Slice 4 refinement)*
-- [ ] User can toggle to a table view and filter by any column. *(Slice 5)*
-- [ ] Fill-rate indicators on table columns. *(Slice 5)*
-- [ ] Summary stats panel. *(Slice 6)*
-- [ ] CSV export. *(Slice 7)*
-- [ ] About page + snapshot date visible. *(Slice 7)*
+- [x] MAPC-wide feature queries work. *(Slice 3)*
+- [x] Regional view renders defensibly for at least one representative of each (low-N, mid-N, high-N) × (discrete, continuous) combination. *(Slice 3 baseline; Slice 4 refinement)*
+- [x] User can toggle to a table view and filter by any column. *(Slice 5)*
+- [x] Fill-rate indicators on table columns. *(Slice 5)*
+- [x] CSV export. *(Slice 5.1)*
+- [ ] Sharable URL state — `?feature=…&muni=…`. *(Slice 6)*
+- [ ] Summary stats panel. *(Slice 7)*
+- [ ] About page + snapshot date visible. *(Slice 8)*
 - [ ] Deployed at a public URL Stephen can share with 5–10 colleagues for validation.
 
 ## 14. Design Principles (codified from discussions)
@@ -397,13 +455,15 @@ Updated from the original PRD:
 
 - **Completeness tier values.** First-draft tiering in §9.3 and §10.3 is hand-wavey; needs a pass with someone who knows MAPC's data landscape better than I do.
 - **Authoritative-source joins.** Where we know the true count (e.g., DESE school roster), should the completeness view show `(OSM count) / (authoritative)` as an explicit ratio? Probably yes eventually, but out of scope for Slice 3.
-- **Snapshot freshness.** Footer currently says "Snapshot: TBD." Need to wire `snapshot` from `_manifest.json` into the footer.
-- **Sub-region geography.** "MAPC sub-region" is used for the muni-dropdown grouping. Should sub-regions be selectable as a geography unit too ("Inner Core," "North Shore")? Probably post-v1.
-- **Advanced mode.** Deferred; sketch only (§7.3).
+- **Snapshot freshness.** Footer currently says "Snapshot: TBD." Need to wire `snapshot` from `_manifest.json` into the footer (Slice 8).
+- **URL state scope.** Slice 6 wires `?feature=` and `?muni=`. Open: should `?view=` (map/table), `?bin=` (active bin highlight), and table column selection also round-trip? Arguing for yes ("send someone the Salem playgrounds *table* pre-scrolled to the surface column"). Arguing against: URL bloat and fragile state. Probably start with feature+muni and expand if real usage pushes for more.
+- **Sub-region geography.** "MAPC sub-region" is used for the muni-dropdown grouping. Should sub-regions be selectable as a geography unit too ("Inner Core," "North Shore")? Post-v1.
+- **Advanced mode.** Post-v1; sketch only (§7.3).
+- **Hex density.** Deferred from v1 (was Slice 4B). Revisit post-launch if a use case materializes.
+- **Normalization.** Post-v1. Blocked on picking a defensible denominator dataset.
 - **Mobile.** Deferred.
 - **About copy.** Who writes it.
 - **Branding.** Neutral for now. Eventually may want to match MAPC/DataCommon visual language.
-- **URL state sync.** Sketched but not wired.
 
 ---
 
