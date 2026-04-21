@@ -751,6 +751,14 @@ function App() {
           </span>
           <span>Snapshot: TBD</span>
           <AboutDataChip />
+          <a
+            href="https://github.com/SLarrick/mapc-osm-explorer"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline hover:text-slate-700"
+          >
+            GitHub
+          </a>
           <span className="ml-auto">MAPC OSM Explorer · v0.0.1</span>
         </div>
       </footer>
