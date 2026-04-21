@@ -4,7 +4,7 @@
  * Scope (Slice 6, v1):
  *   - feature: subtype slug (e.g. "playgrounds")
  *   - muni:    muni slug (e.g. "salem"), or "mapc-region" for region scope
- *   - view:    "map" | "table" — omitted when "map" (the default)
+ *   - view:    "map" | "table" | "summary" — omitted when "map" (the default)
  *
  * Deliberately out of scope:
  *   - active choropleth bin highlight (session state, not share state)
@@ -22,7 +22,7 @@
 export interface UrlState {
   feature: string | null;
   muni: string | null;
-  view: "map" | "table";
+  view: "map" | "table" | "summary";
 }
 
 const FEATURE_KEY = "feature";
@@ -38,7 +38,8 @@ export function readUrlState(): UrlState {
   const feature = params.get(FEATURE_KEY);
   const muni = params.get(MUNI_KEY);
   const viewRaw = params.get(VIEW_KEY);
-  const view = viewRaw === "table" ? "table" : "map";
+  const view =
+    viewRaw === "table" ? "table" : viewRaw === "summary" ? "summary" : "map";
   return {
     feature: feature && feature.length > 0 ? feature : null,
     muni: muni && muni.length > 0 ? muni : null,
@@ -66,6 +67,7 @@ export function writeUrlState(state: UrlState): void {
   else p.delete(MUNI_KEY);
 
   if (state.view === "table") p.set(VIEW_KEY, "table");
+  else if (state.view === "summary") p.set(VIEW_KEY, "summary");
   else p.delete(VIEW_KEY);
 
   const next = url.pathname + (p.toString() ? "?" + p.toString() : "") + url.hash;

@@ -27,6 +27,7 @@ import { ChoroplethLegend } from "./components/ChoroplethLegend";
 import { CoverageCaveat } from "./components/CoverageCaveat";
 import { AboutDataChip } from "./components/AboutDataChip";
 import { TableView, type TableScope } from "./components/TableView";
+import { SummaryView } from "./components/SummaryView";
 import { FeaturePicker, MuniPicker, MAPC_REGION_SLUG } from "./components/Pickers";
 import {
   findFeaturesInMuni,
@@ -38,7 +39,7 @@ import { getSubtypeBySlug } from "./lib/taxonomy";
 import { computeChoropleth, groupMunisByBin } from "./lib/choropleth";
 import { readUrlState, writeUrlState } from "./lib/urlState";
 
-type View = "map" | "table";
+type View = "map" | "table" | "summary";
 
 interface ManifestCategory {
   slug: string;
@@ -645,6 +646,11 @@ function App() {
               active={view === "table"}
               onClick={() => setView("table")}
             />
+            <ViewTab
+              label="Summary"
+              active={view === "summary"}
+              onClick={() => setView("summary")}
+            />
             {view === "map" && regionMeta && !regionMeta.renderable &&
               !choroplethEnabled && (
                 <span className="ml-auto text-xs text-slate-500 italic pr-2">
@@ -702,7 +708,7 @@ function App() {
                 />
               )}
             </div>
-          ) : (
+          ) : view === "table" ? (
             <TableView
               features={results ? (results.features as ResultFeature[]) : null}
               countsByMuni={regionMeta?.countsByMuni ?? null}
@@ -715,6 +721,16 @@ function App() {
               scope={tableScope}
               onScopeChange={(s) => setTableScopeOverride(s)}
               canToggleScope={canToggleTableScope}
+            />
+          ) : (
+            <SummaryView
+              features={results ? (results.features as ResultFeature[]) : null}
+              countsByMuni={regionMeta?.countsByMuni ?? null}
+              munis={munis}
+              subtype={selectedSubtype}
+              focusedMuniName={selectedMuni?.name ?? null}
+              isRegion={isRegion}
+              onSelectMuni={setSelectedMuniSlug}
             />
           )}
         </section>
