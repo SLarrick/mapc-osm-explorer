@@ -20,7 +20,7 @@
  * The map drives muni selection too: clicking a muni polygon sets
  * `selectedMuniSlug` exactly as if the dropdown had changed.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { MapView } from "./components/MapView";
 import { DetailPanel, downloadGeoJSON } from "./components/DetailPanel";
 import { ChoroplethLegend } from "./components/ChoroplethLegend";
@@ -36,6 +36,7 @@ import {
 import { listMunicipalities, type MuniSummary } from "./lib/geo";
 import { getSubtypeBySlug } from "./lib/taxonomy";
 import { computeChoropleth, groupMunisByBin } from "./lib/choropleth";
+import { readUrlState, writeUrlState } from "./lib/urlState";
 
 type View = "map" | "table";
 
@@ -74,11 +75,20 @@ interface FocusedMeta {
 }
 
 function App() {
+  // Read URL state once at mount (lazy initializer so useState sees the
+  // pre-parsed values on the very first render). This avoids a flash of
+  // empty state + a write effect that would clobber the URL before we'd
+  // read it. Validation against the actual catalogs happens in a later
+  // effect once categories + munis are loaded.
+  const urlInit = useMemo(() => readUrlState(), []);
+
   // User-facing selections.
   const [selectedSubtypeSlug, setSelectedSubtypeSlug] = useState<string | null>(
-    null,
+    urlInit.feature,
   );
-  const [selectedMuniSlug, setSelectedMuniSlug] = useState<string | null>(null);
+  const [selectedMuniSlug, setSelectedMuniSlug] = useState<string | null>(
+    urlInit.muni,
+  );
 
   // Catalog data for the dropdowns.
   const [categories, setCategories] = useState<ManifestCategory[]>([]);
@@ -108,7 +118,7 @@ function App() {
   // query shape. Once they click, their choice sticks through subsequent
   // queries until they reset it (happens automatically when the selection
   // changes — see the useEffect below).
-  const [view, setView] = useState<View>("map");
+  const [view, setView] = useState<View>(urlInit.view);
   const [choroplethOverride, setChoroplethOverride] =
     useState<boolean | null>(null);
   const [tableScopeOverride, setTableScopeOverride] =
@@ -147,6 +157,57 @@ function App() {
       cancelled = true;
     };
   }, []);
+
+  // Once-per-session: after the catalogs load, validate whatever came
+  // out of the URL and auto-run the query if both selections are set.
+  //
+  // Validation matters because URLs live in emails + shared docs longer
+  // than our taxonomy is guaranteed to stay stable. A URL pointing to a
+  // removed subtype or muni should degrade to "no selection" rather
+  // than throwing.
+  const didBootFromUrlRef = useRef(false);
+  useEffect(() => {
+    if (didBootFromUrlRef.current) return;
+    if (categories.length === 0 || munis.length === 0) return;
+    didBootFromUrlRef.current = true;
+
+    // Clear stale URL subtype (hand-curated list changed out from under it).
+    if (
+      selectedSubtypeSlug &&
+      !getSubtypeBySlug(selectedSubtypeSlug)
+    ) {
+      setSelectedSubtypeSlug(null);
+      return;
+    }
+    // Clear stale muni slug (region is always valid).
+    if (
+      selectedMuniSlug &&
+      selectedMuniSlug !== MAPC_REGION_SLUG &&
+      !munis.some((m) => m.slug === selectedMuniSlug)
+    ) {
+      setSelectedMuniSlug(null);
+      return;
+    }
+    // If the URL gave us a complete query, run it — a shared URL should
+    // land the recipient on the result, not on a "Find data" button.
+    if (selectedSubtypeSlug && selectedMuniSlug) {
+      void handleFind();
+    }
+    // handleFind + state read closure-over-current-values intentionally.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [categories.length, munis.length]);
+
+  // Mirror the three sharable selections back out to the URL via
+  // replaceState. Runs on every change after the first mount — by the
+  // time this fires on initial render, the values already match the URL
+  // (we seeded state from it), so it's effectively a no-op at mount.
+  useEffect(() => {
+    writeUrlState({
+      feature: selectedSubtypeSlug,
+      muni: selectedMuniSlug,
+      view,
+    });
+  }, [selectedSubtypeSlug, selectedMuniSlug, view]);
 
   // Geography/subtype change invalidates stale results — otherwise the
   // previous query's pins would hover over the new geography while the
