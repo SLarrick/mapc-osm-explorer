@@ -537,7 +537,7 @@ function FeatureTable(props: {
                   className={
                     "cursor-pointer " +
                     (isSelected
-                      ? "bg-sky-100"
+                      ? "bg-rose-100"
                       : vRow.index % 2 === 0
                         ? "bg-white hover:bg-slate-50"
                         : "bg-slate-50/50 hover:bg-slate-100")

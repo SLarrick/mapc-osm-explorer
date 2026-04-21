@@ -2,8 +2,10 @@
  * Region-layers legend — floats bottom-left of the map in region mode.
  *
  * Holds two toggles for what's drawn on the map:
- *   - "Show <subtype> as points" — toggles the results overlay.
- *   - "Shade munis by count"     — toggles the muni-choropleth fill.
+ *   - "Show features"              — toggles the results overlay (works
+ *                                    regardless of whether the subtype's
+ *                                    geometry is points, lines, or polygons).
+ *   - "Shade munis by feature count" — toggles the muni-choropleth fill.
  * Plus the bin legend itself. Clicking a bin row expands it to a
  * scrollable list of munis in that bin (sorted alphabetically), and
  * highlights those munis on the map via `onBinSelect`.
@@ -82,9 +84,7 @@ export function ChoroplethLegend(props: Props) {
           checked={pointsEnabled}
           onChange={(e) => onTogglePoints(e.target.checked)}
         />
-        <span className="text-slate-700">
-          Show as points
-        </span>
+        <span className="text-slate-700">Show features</span>
       </label>
 
       <label className="flex items-center gap-2 cursor-pointer py-0.5 mb-1">
@@ -93,7 +93,7 @@ export function ChoroplethLegend(props: Props) {
           checked={choroplethEnabled}
           onChange={(e) => onToggleChoropleth(e.target.checked)}
         />
-        <span className="text-slate-700">Shade munis by count</span>
+        <span className="text-slate-700">Shade munis by feature count</span>
       </label>
 
       {bins.empty ? (

@@ -24,6 +24,8 @@ import { useEffect, useMemo, useState } from "react";
 import { MapView } from "./components/MapView";
 import { DetailPanel, downloadGeoJSON } from "./components/DetailPanel";
 import { ChoroplethLegend } from "./components/ChoroplethLegend";
+import { CoverageCaveat } from "./components/CoverageCaveat";
+import { AboutDataChip } from "./components/AboutDataChip";
 import { TableView, type TableScope } from "./components/TableView";
 import { FeaturePicker, MuniPicker, MAPC_REGION_SLUG } from "./components/Pickers";
 import {
@@ -247,11 +249,14 @@ function App() {
   // there's no single muni to frame the page around.
   const focused = Boolean(selectedMuniSlug) && !isRegion;
 
-  // Tier-3 features (benches, street trees, etc.) deserve a prominent
-  // coverage caveat at region scale, because the number-on-screen is
-  // primarily a function of where mappers live, not where the thing is.
+  // Post-query coverage caveat: attached to the result line in both
+  // region and focused modes. Shown for partial + spotty tiers; high-
+  // tier subtypes (hospitals, fire stations) get no caveat. The caveat
+  // component no-ops when tier === "high".
   const showCoverageCaveat =
-    isRegion && selectedSubtype?.completeness === "spotty";
+    (results !== null || regionMeta !== null || focusedMeta !== null) &&
+    selectedSubtype !== null &&
+    selectedSubtype.completeness !== "high";
 
   function handleDownloadAll() {
     if (!results || !selectedSubtype) return;
@@ -436,6 +441,14 @@ function App() {
                 ) : (
                   <span>Pick a feature to query.</span>
                 )}
+                {showCoverageCaveat && selectedSubtype && (
+                  <CoverageCaveat
+                    tier={selectedSubtype.completeness}
+                    subtypeLabel={selectedSubtype.label}
+                    muniName={selectedMuni?.name ?? null}
+                    className="basis-full"
+                  />
+                )}
               </div>
             </div>
           </section>
@@ -462,18 +475,6 @@ function App() {
               />
               .
             </h2>
-
-            {/* Tier-3 coverage caveat — shown pre-query, so the user frames
-                what they're about to look at as "where mapping has
-                happened" rather than "where the thing actually is." */}
-            {showCoverageCaveat && (
-              <div className="mx-auto mb-4 max-w-xl rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 text-left">
-                <strong className="font-semibold">Heads up:</strong> OSM
-                coverage of {selectedSubtype?.label.toLowerCase()} across
-                MAPC is uneven. Regional results reflect where mappers have
-                been active as much as where the feature actually exists.
-              </div>
-            )}
 
             <button
               onClick={handleFind}
@@ -556,6 +557,14 @@ function App() {
                   Pick a feature and a place — or click a municipality on the
                   map.
                 </span>
+              )}
+              {showCoverageCaveat && selectedSubtype && (
+                <CoverageCaveat
+                  tier={selectedSubtype.completeness}
+                  subtypeLabel={selectedSubtype.label}
+                  muniName={null}
+                  className="mt-2 max-w-2xl text-left"
+                />
               )}
             </div>
           </section>
@@ -650,7 +659,7 @@ function App() {
         </section>
       </main>
 
-      <footer className="border-t border-slate-200 bg-white">
+      <footer className="border-t border-slate-200 bg-white relative">
         <div className="max-w-6xl mx-auto px-6 py-4 text-sm text-slate-500 flex flex-wrap gap-x-6 gap-y-1">
           <span>
             Data ©{" "}
@@ -664,6 +673,7 @@ function App() {
             </a>
           </span>
           <span>Snapshot: TBD</span>
+          <AboutDataChip />
           <span className="ml-auto">MAPC OSM Explorer · v0.0.1</span>
         </div>
       </footer>

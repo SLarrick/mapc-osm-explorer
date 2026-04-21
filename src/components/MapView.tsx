@@ -681,29 +681,36 @@ function renderResults(
     };
 
     // Pure selection (no zoom) — plain `case` is fine.
+    //
+    // Feature palette: warm amber for the default state, rose for the
+    // selected state. The choropleth fill is sky-blue, and the dashed
+    // pre-query hover juice on muni-fill is sky-500 — so putting feature
+    // geometries in a warm accent gives them foreground/background
+    // contrast against the choropleth and keeps the "this one's picked"
+    // accent visually distinct from the ambient interactive blue.
     const FILL_COLOR: maplibregl.ExpressionSpecification = [
       "case",
       ["boolean", ["feature-state", "selected"], false],
+      "#f43f5e", // rose-500
       "#f59e0b", // amber-500
-      "#0284c7", // sky-600
     ];
     const STROKE_COLOR: maplibregl.ExpressionSpecification = [
       "case",
       ["boolean", ["feature-state", "selected"], false],
+      "#be123c", // rose-700
       "#b45309", // amber-700
-      "#0369a1", // sky-700
     ];
     const CIRCLE_COLOR_HALO: maplibregl.ExpressionSpecification = [
       "case",
       ["boolean", ["feature-state", "selected"], false],
-      "#f59e0b",
-      "#0ea5e9", // sky-500
+      "#fb7185", // rose-400
+      "#fbbf24", // amber-400
     ];
     const CIRCLE_COLOR_DOT: maplibregl.ExpressionSpecification = [
       "case",
       ["boolean", ["feature-state", "selected"], false],
-      "#f59e0b",
-      "#0284c7", // sky-600
+      "#f43f5e", // rose-500
+      "#f59e0b", // amber-500
     ];
 
     // Polygon fill
