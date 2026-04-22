@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
+import polygonClipping from "polygon-clipping";
 import type { ChoroplethBins } from "../lib/choropleth";
 
 /**
@@ -347,11 +348,9 @@ export function MapView({
       });
 
       // Subregion-scope outline — drawn around every muni that belongs
-      // to the currently-selected subregion. Slate-900 dashed so it
-      // reads as "this is the framing of what you're looking at" —
-      // semantically closer to the MAPC outer boundary than to the
-      // bin-highlight accent. Drawn BELOW the bin-highlight layer so
-      // an active bin still pops in sky-600 on top of the dashed scope.
+      // to the currently-selected subregion. Slate-900 dashed + thinner,
+      // reads as "internal muni divisions within the scope." Pairs with
+      // the solid exterior boundary layer below.
       map.addLayer({
         id: "munis-scope-outline",
         type: "line",
@@ -359,9 +358,30 @@ export function MapView({
         filter: ["in", ["get", "slug"], ["literal", []]],
         paint: {
           "line-color": "#0f172a", // slate-900
-          "line-width": 1.8,
-          "line-opacity": 0.75,
+          "line-width": 1.2,
+          "line-opacity": 0.55,
           "line-dasharray": [3, 2],
+        },
+      });
+
+      // Subregion exterior boundary — the single perimeter line around
+      // the whole subregion, computed client-side as a union of its
+      // member munis. Solid slate-900 at the same weight as the MAPC
+      // outer boundary, so visually "MAPC outer" and "active subregion
+      // outer" feel like the same class of framing line. Source starts
+      // empty; gets populated whenever scopeMuniSlugs changes.
+      map.addSource("mapc-subregion-boundary", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+      map.addLayer({
+        id: "mapc-subregion-boundary-outline",
+        type: "line",
+        source: "mapc-subregion-boundary",
+        paint: {
+          "line-color": "#0f172a", // slate-900
+          "line-width": 1.8,
+          "line-opacity": 0.9,
         },
       });
 
@@ -469,6 +489,7 @@ export function MapView({
         choroplethRef.current,
       );
       applyScopeOutline(map, scopeMuniSlugsRef.current);
+      applySubregionBoundary(map, scopeMuniSlugsRef.current, munisFcRef.current);
       applyBinHighlight(map, highlightedMuniSlugsRef.current);
       // Initial subregion fit-bounds if we booted into a subregion scope
       // with no single-muni selection.
@@ -567,6 +588,7 @@ export function MapView({
       return;
     }
     applyScopeOutline(map, slugs);
+    applySubregionBoundary(map, slugs, munisFcRef.current);
     const key = slugs.slice().sort().join(",");
     const changed = key !== prevScopeKeyRef.current;
     prevScopeKeyRef.current = key;
@@ -673,6 +695,90 @@ function applyScopeOutline(map: maplibregl.Map, slugs: string[]): void {
     ["get", "slug"],
     ["literal", slugs],
   ]);
+}
+
+/**
+ * Compute the exterior boundary of a subregion — the single perimeter
+ * line around its member munis — and push it into the subregion
+ * boundary source. Empty slugs = empty source (no line drawn).
+ *
+ * Uses polygon-clipping's `union` to dissolve the member munis into a
+ * single MultiPolygon. Edges between member munis disappear; only the
+ * outer perimeter remains. Cheap at this scale (≤21 munis per
+ * subregion, hundreds of vertices each) — sub-50ms on the largest
+ * subregion (Inner Core).
+ */
+function applySubregionBoundary(
+  map: maplibregl.Map,
+  slugs: string[],
+  munisFc: GeoJSON.FeatureCollection | null,
+): void {
+  const source = map.getSource("mapc-subregion-boundary") as
+    | maplibregl.GeoJSONSource
+    | undefined;
+  if (!source) return;
+  const empty: GeoJSON.FeatureCollection = {
+    type: "FeatureCollection",
+    features: [],
+  };
+  if (!munisFc || slugs.length === 0) {
+    source.setData(empty);
+    return;
+  }
+  const set = new Set(slugs);
+  // Collect each member muni's coordinate rings in polygon-clipping's
+  // expected shape: Array<Polygon>, Polygon = Array<Ring>, Ring = Array<[x,y]>.
+  const polygons: Array<Array<Array<[number, number]>>> = [];
+  for (const f of munisFc.features) {
+    const slug = (f.properties as { slug?: string } | null)?.slug;
+    if (!slug || !set.has(slug)) continue;
+    const geom = f.geometry;
+    if (!geom) continue;
+    if (geom.type === "Polygon") {
+      polygons.push(geom.coordinates as Array<Array<[number, number]>>);
+    } else if (geom.type === "MultiPolygon") {
+      for (const poly of geom.coordinates) {
+        polygons.push(poly as Array<Array<[number, number]>>);
+      }
+    }
+  }
+  if (polygons.length === 0) {
+    source.setData(empty);
+    return;
+  }
+  let dissolved: ReturnType<typeof polygonClipping.union>;
+  try {
+    // polygon-clipping.union takes (geom, ...geoms) rest args. Each is
+    // a MultiPolygon (Array<Polygon>). We wrap each Polygon as a
+    // MultiPolygon-of-one and spread — first arg is the seed, the
+    // rest get unioned into it.
+    const mps = polygons.map(
+      (p) => [p] as [Array<Array<[number, number]>>],
+    );
+    dissolved = polygonClipping.union(mps[0], ...mps.slice(1));
+  } catch (e) {
+    // Very rare — malformed geometry in a muni. Fall back to no
+    // boundary rather than crashing the map.
+    // eslint-disable-next-line no-console
+    console.warn("[subregion-boundary] union failed:", e);
+    source.setData(empty);
+    return;
+  }
+  // polygon-clipping returns a MultiPolygon (Array<Polygon>). Wrap as
+  // a single MultiPolygon feature.
+  source.setData({
+    type: "FeatureCollection",
+    features: [
+      {
+        type: "Feature",
+        properties: {},
+        geometry: {
+          type: "MultiPolygon",
+          coordinates: dissolved as unknown as GeoJSON.Position[][][],
+        },
+      },
+    ],
+  });
 }
 
 /**

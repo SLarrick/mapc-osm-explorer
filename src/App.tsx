@@ -503,6 +503,27 @@ function App() {
   // off, we pass null so the circle / fill / line layers go empty.
   const mapResults = pointsEnabled ? results : null;
 
+  /**
+   * Route a muni-polygon click to the right destination.
+   *
+   * Default: the muni slug flows straight through to setSelectedMuniSlug.
+   * Exception: when the map is in region mode with binBy=subregion, the
+   * user is looking at the subregion aggregate — clicking a muni's
+   * polygon should route them to that muni's primary subregion, not the
+   * muni itself. (Subregion scope stays at muni-granularity for clicks
+   * so users can drill into individual munis from there.)
+   */
+  function handleMapMuniClick(muniClickSlug: string): void {
+    if (isRegion && binBy === "subregion") {
+      const subs = subregionsForMuni(muniClickSlug);
+      if (subs.length > 0) {
+        setSelectedMuniSlug(subs[0]);
+        return;
+      }
+    }
+    setSelectedMuniSlug(muniClickSlug);
+  }
+
   // Set of muni slugs belonging to the active subregion — empty outside
   // subregion scope. Drives the map's dashed scope outline, the
   // initial fit-bounds to the subregion envelope, and the list of
@@ -838,7 +859,7 @@ function App() {
                 selectedId={selectedId}
                 onSelectFeature={setSelectedId}
                 selectedMuniSlug={mapMuniSlug}
-                onSelectMuni={setSelectedMuniSlug}
+                onSelectMuni={handleMapMuniClick}
                 choropleth={mapChoropleth}
                 highlightedMuniSlugs={highlightedMuniSlugs}
                 scopeMuniSlugs={subregionMuniSlugs}

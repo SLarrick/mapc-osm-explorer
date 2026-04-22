@@ -125,7 +125,10 @@ export function ChoroplethLegend(props: Props) {
           checked={choroplethEnabled}
           onChange={(e) => onToggleChoropleth(e.target.checked)}
         />
-        <span className="text-slate-700">Shade munis by feature count</span>
+        <span className="text-slate-700">
+          Shade {binBy === "subregion" ? "subregions" : "munis"} by
+          feature count
+        </span>
       </label>
 
       {onBinByChange && (
