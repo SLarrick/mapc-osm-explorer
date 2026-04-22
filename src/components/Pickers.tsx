@@ -3,15 +3,17 @@
  *
  * The landing hero reads
  *   "I'm looking for data about [FEATURE ▾] in [MUNI ▾]."
- * Each bracketed token is a styled <select> — it looks like the dashed-border
- * pill we had when these were hardcoded, but it's a real native control
- * (so keyboard + screen readers work for free).
  *
- * Manifest categories are used only as optgroup headers in the feature
- * picker; the selected value is still a subtype slug. Munis are grouped
- * by MAPC sub-region when that's available.
+ * Feature picker is a native <select> (50ish options grouped by category
+ * — the subregion "where is Wakefield?" problem doesn't apply, and a
+ * native control gets keyboard + a11y for free).
+ *
+ * Muni picker is a custom combobox: with 101 munis grouped by MAPC
+ * subregion, the native <select> worked but forced users to know which
+ * subregion a muni lives in. The combobox lets you type the name and
+ * still surfaces the subregion as secondary context in the list.
  */
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { SUBTYPES, type Subtype } from "../lib/taxonomy";
 import type { MuniSummary } from "../lib/geo";
 
@@ -71,44 +73,236 @@ interface MuniPickerProps {
   onChange: (muniSlug: string) => void;
 }
 
+interface MuniOption {
+  slug: string;
+  name: string;
+  /** MAPC subregion (shown as secondary context), or "Region-wide" sentinel. */
+  subregion: string;
+}
+
+/**
+ * Display label for the current selection — "Entire MAPC region" for the
+ * sentinel, the muni name for a real slug, or the placeholder prompt
+ * when nothing is picked.
+ */
+function muniLabelFor(
+  value: string | null,
+  munis: MuniSummary[],
+): string {
+  if (!value) return "pick a place";
+  if (value === MAPC_REGION_SLUG) return "Entire MAPC region";
+  return munis.find((m) => m.slug === value)?.name ?? "pick a place";
+}
+
 export function MuniPicker({ munis, value, onChange }: MuniPickerProps) {
-  // Group by MAPC sub-region when present, alphabetize within each group.
-  const grouped = useMemo(() => {
-    const byRegion: Record<string, MuniSummary[]> = {};
-    for (const m of munis) {
-      const key = m.subregion ?? "Other";
-      if (!byRegion[key]) byRegion[key] = [];
-      byRegion[key].push(m);
-    }
-    const regions = Object.keys(byRegion).sort((a, b) => a.localeCompare(b));
-    return regions.map((r) => ({
-      label: r,
-      items: byRegion[r].sort((a, b) => a.name.localeCompare(b.name)),
-    }));
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [activeIdx, setActiveIdx] = useState(0);
+  const rootRef = useRef<HTMLSpanElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+
+  // Flat option list: [region-wide sentinel, then munis sorted alphabetically
+  // with subregion as secondary text]. We lean on the subregion as *context*
+  // now rather than a navigational primary — it answers "where is this?"
+  // without forcing the user to know it up front.
+  const options = useMemo<MuniOption[]>(() => {
+    const regionOpt: MuniOption = {
+      slug: MAPC_REGION_SLUG,
+      name: "Entire MAPC region",
+      subregion: "Region-wide",
+    };
+    const muniOpts: MuniOption[] = munis
+      .slice()
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((m) => ({
+        slug: m.slug,
+        name: m.name,
+        subregion: m.subregion ?? "Other",
+      }));
+    return [regionOpt, ...muniOpts];
   }, [munis]);
 
+  // Substring match on name + subregion. Case-insensitive, no fancy
+  // fuzziness — users mostly know the start of the muni name.
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return options;
+    return options.filter(
+      (o) =>
+        o.name.toLowerCase().includes(q) ||
+        o.subregion.toLowerCase().includes(q),
+    );
+  }, [options, query]);
+
+  // Reset cursor when the filter changes so arrow keys don't point into
+  // stale indexes.
+  useEffect(() => {
+    setActiveIdx(0);
+  }, [query]);
+
+  // Click-outside closes the panel. Mousedown (not click) so selecting a
+  // list item via onMouseDown still wins — the outside handler sees the
+  // picker is still the target.
+  useEffect(() => {
+    if (!open) return;
+    function onMouseDown(e: MouseEvent) {
+      if (!rootRef.current) return;
+      if (!rootRef.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener("mousedown", onMouseDown);
+    return () => document.removeEventListener("mousedown", onMouseDown);
+  }, [open]);
+
+  // Autofocus the input + clear query when panel opens.
+  useEffect(() => {
+    if (open) {
+      setQuery("");
+      setActiveIdx(0);
+      // Next tick so the input exists in the DOM.
+      queueMicrotask(() => inputRef.current?.focus());
+    }
+  }, [open]);
+
+  // Scroll the active row into view on arrow navigation.
+  useEffect(() => {
+    if (!open) return;
+    const list = listRef.current;
+    if (!list) return;
+    const row = list.querySelector<HTMLLIElement>(
+      `[data-idx="${activeIdx}"]`,
+    );
+    row?.scrollIntoView({ block: "nearest" });
+  }, [activeIdx, open]);
+
+  function commit(slug: string) {
+    onChange(slug);
+    setOpen(false);
+  }
+
+  function onKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setActiveIdx((i) => Math.min(i + 1, filtered.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActiveIdx((i) => Math.max(i - 1, 0));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const o = filtered[activeIdx];
+      if (o) commit(o.slug);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      setOpen(false);
+    }
+  }
+
+  const label = muniLabelFor(value, munis);
+  const isEmpty = !value;
+
   return (
-    <PillSelect value={value ?? ""} onChange={onChange} ariaLabel="Municipality">
-      <option value="" disabled>
-        pick a place
-      </option>
-      {/* Region-wide option sits in its own optgroup at the top, above the
-          sub-region groups. Native <select> can't render a visual divider,
-          but the solo-group position and "Entire MAPC region" phrasing
-          read as a distinct tier from the 101 individual munis. */}
-      <optgroup label="Region-wide">
-        <option value={MAPC_REGION_SLUG}>Entire MAPC region</option>
-      </optgroup>
-      {grouped.map((g) => (
-        <optgroup key={g.label} label={g.label}>
-          {g.items.map((m) => (
-            <option key={m.slug} value={m.slug}>
-              {m.name}
-            </option>
-          ))}
-        </optgroup>
-      ))}
-    </PillSelect>
+    <span ref={rootRef} className="inline-block align-baseline relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label="Municipality"
+        className={
+          "px-3 py-1 rounded-md border border-dashed bg-sky-50 " +
+          "text-2xl md:text-3xl font-semibold tracking-tight " +
+          "focus:outline-none focus:ring-2 focus:ring-sky-400 " +
+          "cursor-pointer appearance-none pr-7 " +
+          (isEmpty
+            ? "border-sky-400 text-sky-600/70 italic "
+            : "border-sky-500 text-sky-700 ")
+        }
+        style={{
+          backgroundImage:
+            "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%230369a1' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E\")",
+          backgroundPosition: "right 0.5rem center",
+          backgroundRepeat: "no-repeat",
+          backgroundSize: "0.9rem",
+        }}
+      >
+        {label}
+      </button>
+
+      {open && (
+        <div
+          className="absolute left-0 top-full mt-1 w-[320px] max-w-[90vw] bg-white rounded-md border border-slate-200 shadow-lg z-30 text-base"
+          role="dialog"
+        >
+          <div className="p-2 border-b border-slate-100">
+            <input
+              ref={inputRef}
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={onKeyDown}
+              placeholder="Type a municipality or subregion…"
+              className="w-full px-2 py-1.5 text-sm rounded border border-slate-200 focus:outline-none focus:ring-1 focus:ring-sky-400 focus:border-sky-400 text-slate-900 placeholder:text-slate-400 italic"
+              aria-autocomplete="list"
+              aria-controls="muni-picker-list"
+              aria-activedescendant={
+                filtered[activeIdx]
+                  ? `muni-opt-${filtered[activeIdx].slug}`
+                  : undefined
+              }
+            />
+          </div>
+          <ul
+            ref={listRef}
+            id="muni-picker-list"
+            role="listbox"
+            className="max-h-72 overflow-auto py-1"
+          >
+            {filtered.length === 0 ? (
+              <li className="px-3 py-2 text-sm text-slate-400 italic">
+                No matches — try a different spelling?
+              </li>
+            ) : (
+              filtered.map((o, i) => {
+                const active = i === activeIdx;
+                const selected = o.slug === value;
+                const isRegion = o.slug === MAPC_REGION_SLUG;
+                return (
+                  <li
+                    key={o.slug}
+                    data-idx={i}
+                    id={`muni-opt-${o.slug}`}
+                    role="option"
+                    aria-selected={selected}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      commit(o.slug);
+                    }}
+                    onMouseEnter={() => setActiveIdx(i)}
+                    className={
+                      "px-3 py-1.5 text-sm cursor-pointer flex items-baseline gap-2 " +
+                      (active ? "bg-sky-50 " : "") +
+                      (selected ? "font-medium " : "") +
+                      (isRegion
+                        ? "border-b border-slate-100 "
+                        : "")
+                    }
+                  >
+                    <span className="text-slate-900 flex-1 truncate">
+                      {o.name}
+                    </span>
+                    {!isRegion && (
+                      <span className="text-[11px] text-slate-400 truncate">
+                        {o.subregion}
+                      </span>
+                    )}
+                  </li>
+                );
+              })
+            )}
+          </ul>
+        </div>
+      )}
+    </span>
   );
 }
 

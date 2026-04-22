@@ -20,7 +20,6 @@
 import { useMemo } from "react";
 import {
   binRangeLabel,
-  countZeroMunis,
   groupMunisByBin,
   type ChoroplethBins,
 } from "../lib/choropleth";
@@ -66,7 +65,21 @@ export function ChoroplethLegend(props: Props) {
     () => groupMunisByBin(counts, muniNameBySlug, bins),
     [counts, muniNameBySlug, bins],
   );
-  const zeroCount = countZeroMunis(counts);
+
+  // Drop bins at the top of the ramp that no muni actually falls into.
+  // The bin-stops are quantile-derived but occasionally yield an empty
+  // max bin (rounding + ties); showing "944+ · 0 munis" eats real estate
+  // and blunts the contrast of the populated bins by stretching the ramp.
+  //
+  // We keep empty bins in the *middle* of the ramp — those carry useful
+  // "nothing here" information between populated stops. We also omit the
+  // "0 munis" row entirely: white == absent is the intuitive reading.
+  const visibleBinEnd = useMemo(() => {
+    for (let i = bins.colors.length - 1; i >= 0; i--) {
+      if (munisByBin[i].length > 0) return i + 1;
+    }
+    return 0;
+  }, [munisByBin, bins.colors.length]);
 
   return (
     <div
@@ -107,7 +120,7 @@ export function ChoroplethLegend(props: Props) {
             (choroplethEnabled ? "" : "opacity-40")
           }
         >
-          {bins.colors.map((color, i) => {
+          {bins.colors.slice(0, visibleBinEnd).map((color, i) => {
             const munis = munisByBin[i];
             const isActive = activeBin === i;
             return (
@@ -160,16 +173,6 @@ export function ChoroplethLegend(props: Props) {
               </li>
             );
           })}
-          <li className="flex items-center gap-2 py-0.5 pt-1 border-t border-slate-100 mt-0.5">
-            <span
-              className="inline-block w-4 h-3 rounded-sm border border-slate-300/60"
-              style={{ backgroundColor: bins.zeroColor, opacity: 0.35 }}
-            />
-            <span className="text-slate-500 flex-1">0</span>
-            <span className="text-[10px] tabular-nums text-slate-400">
-              {zeroCount} muni{zeroCount === 1 ? "" : "s"}
-            </span>
-          </li>
         </ul>
       )}
     </div>

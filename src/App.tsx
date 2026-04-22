@@ -134,6 +134,20 @@ function App() {
   const [pointsOverride, setPointsOverride] = useState<boolean | null>(null);
   const [activeBin, setActiveBin] = useState<number | null>(null);
 
+  // Slice 7.5 — light client-side filter.
+  //
+  // "Missing name" is the simplest useful filter for planners — a park
+  // or playground without a name tag is a data-quality flag ("what's
+  // this on the map?"). It operates on the normalized ResultFeature
+  // `properties.name` field rather than poking at raw tags, so it works
+  // uniformly across subtypes.
+  //
+  // Design: when active, the filter re-routes every downstream view
+  // (hero count, map, table, summary, CSV download) to the filtered
+  // subset. We keep the chip persistently visible so users aren't left
+  // wondering why the count shrank.
+  const [filterMissingName, setFilterMissingName] = useState(false);
+
   // Load manifest categories + muni list once on mount.
   useEffect(() => {
     let cancelled = false;
@@ -236,6 +250,7 @@ function App() {
     setTableScopeOverride(null);
     setPointsOverride(null);
     setActiveBin(null);
+    setFilterMissingName(false);
     if (hadActiveQuery && selectedSubtypeSlug && selectedMuniSlug) {
       void handleFind();
     }
@@ -284,13 +299,33 @@ function App() {
     }
   }
 
-  const count = results?.features.length ?? 0;
+  // Applied filter — null when no filter is active (lets downstream components
+  // skip the defensive clone). Only the Missing-name filter exists in v1; the
+  // structure is ready for additional chips.
+  const effectiveResults = useMemo<
+    GeoJSON.FeatureCollection<GeoJSON.Geometry> | null
+  >(() => {
+    if (!results) return null;
+    if (!filterMissingName) return results;
+    return {
+      type: "FeatureCollection",
+      features: results.features.filter((f) => {
+        const name = (f.properties as { name?: string | null } | null)?.name;
+        return !name || name === "";
+      }),
+    };
+  }, [results, filterMissingName]);
+
+  const totalCount = results?.features.length ?? 0;
+  const count = effectiveResults?.features.length ?? 0;
+  const filterActive = filterMissingName && results !== null;
 
   const selectedFeature = useMemo<ResultFeature | null>(() => {
-    if (!selectedId || !results) return null;
-    const f = results.features.find((feat) => feat.id === selectedId) ?? null;
+    if (!selectedId || !effectiveResults) return null;
+    const f =
+      effectiveResults.features.find((feat) => feat.id === selectedId) ?? null;
     return f as ResultFeature | null;
-  }, [selectedId, results]);
+  }, [selectedId, effectiveResults]);
 
   const selectedMuni = useMemo(
     () =>
@@ -321,9 +356,13 @@ function App() {
     selectedSubtype.completeness !== "high";
 
   function handleDownloadAll() {
-    if (!results || !selectedSubtype) return;
+    if (!effectiveResults || !selectedSubtype) return;
     const suffix = isRegion ? "mapc-region" : (selectedMuni?.slug ?? "geo");
-    downloadGeoJSON(results, `${selectedSubtype.slug}-${suffix}.geojson`);
+    const filterTag = filterActive ? "-missing-name" : "";
+    downloadGeoJSON(
+      effectiveResults,
+      `${selectedSubtype.slug}-${suffix}${filterTag}.geojson`,
+    );
   }
 
   function handleBackToRegion() {
@@ -392,7 +431,7 @@ function App() {
 
   // The map only draws the results overlay when points are enabled. When
   // off, we pass null so the circle / fill / line layers go empty.
-  const mapResults = pointsEnabled ? results : null;
+  const mapResults = pointsEnabled ? effectiveResults : null;
 
   // Slug → name lookup for the legend's expanded muni list + map tooltips.
   const muniNameBySlug = useMemo(() => {
@@ -670,6 +709,36 @@ function App() {
             )}
           </div>
 
+          {/* Filter row — sits above the active view and applies uniformly
+              across map / table / summary / CSV download. Only shown when
+              a query has returned something we can filter. */}
+          {results && totalCount > 0 && (
+            <div className="flex flex-wrap items-center gap-2 mb-3 text-xs">
+              <span className="text-slate-500 uppercase tracking-wider text-[11px]">
+                Filter
+              </span>
+              <FilterChip
+                active={filterMissingName}
+                onToggle={() => setFilterMissingName((v) => !v)}
+              >
+                Missing name only
+              </FilterChip>
+              {filterActive && (
+                <span className="text-slate-500 italic ml-1">
+                  Showing{" "}
+                  <span className="tabular-nums">
+                    {count.toLocaleString()}
+                  </span>{" "}
+                  of{" "}
+                  <span className="tabular-nums">
+                    {totalCount.toLocaleString()}
+                  </span>
+                  .
+                </span>
+              )}
+            </div>
+          )}
+
           {view === "map" ? (
             <div
               className={
@@ -710,7 +779,11 @@ function App() {
             </div>
           ) : view === "table" ? (
             <TableView
-              features={results ? (results.features as ResultFeature[]) : null}
+              features={
+                effectiveResults
+                  ? (effectiveResults.features as ResultFeature[])
+                  : null
+              }
               countsByMuni={regionMeta?.countsByMuni ?? null}
               munis={munis}
               categorySlug={selectedSubtype?.categorySlug ?? null}
@@ -724,7 +797,11 @@ function App() {
             />
           ) : (
             <SummaryView
-              features={results ? (results.features as ResultFeature[]) : null}
+              features={
+                effectiveResults
+                  ? (effectiveResults.features as ResultFeature[])
+                  : null
+              }
               countsByMuni={regionMeta?.countsByMuni ?? null}
               munis={munis}
               subtype={selectedSubtype}
@@ -763,6 +840,30 @@ function App() {
         </div>
       </footer>
     </div>
+  );
+}
+
+function FilterChip(props: {
+  active: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  const { active, onToggle, children } = props;
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-pressed={active}
+      className={
+        "px-2.5 py-1 rounded-full border text-xs cursor-pointer transition-colors " +
+        (active
+          ? "bg-sky-600 border-sky-600 text-white hover:bg-sky-700"
+          : "bg-white border-slate-300 text-slate-700 hover:border-slate-400")
+      }
+    >
+      {active && <span className="mr-1">✓</span>}
+      {children}
+    </button>
   );
 }
 
