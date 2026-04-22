@@ -68,13 +68,25 @@ interface MapViewProps {
   scopeMuniSlugs?: string[];
   /** Group hover. When set, hovering any muni applies the hover state
    *  to every muni slug in its group (not just the one under the
-   *  cursor), and the tooltip shows the group's display label. Used
-   *  in region + binBy=subregion mode so the user sees the whole
+   *  cursor), and the tooltip shows the group's display label + count.
+   *  Used in region + binBy=subregion mode so the user sees the whole
    *  subregion light up together with its name. Keyed by muni slug,
-   *  value = (group slugs including self, group display label). When
-   *  undefined, MapView falls back to single-muni hover with no
-   *  tooltip (default behavior). */
-  muniHoverGroups?: Map<string, { slugs: string[]; label: string }>;
+   *  value = (group slugs including self, group display label, group
+   *  total count). When undefined, MapView falls back to single-muni
+   *  hover. */
+  muniHoverGroups?: Map<
+    string,
+    { slugs: string[]; label: string; count: number | null }
+  >;
+  /** Per-muni feature counts for hover tooltips. When set, hovering a
+   *  muni (in single-muni hover mode) appends "N features" to the
+   *  tooltip. Independent of the choropleth toggle — the count is
+   *  relevant even when the shaded fill is hidden. */
+  muniHoverCounts?: Map<string, number> | null;
+  /** Lowercase feature label for hover tooltips, e.g. "playgrounds".
+   *  Used to phrase the count as "42 playgrounds" rather than a bare
+   *  number. Null when no subtype is picked — count text is dropped. */
+  featureLabel?: string | null;
 }
 
 // Layer ids we hit-test for the hover tooltip. The circle layer rides the
@@ -206,6 +218,8 @@ export function MapView({
   highlightedMuniSlugs,
   scopeMuniSlugs,
   muniHoverGroups,
+  muniHoverCounts,
+  featureLabel,
 }: MapViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -243,9 +257,20 @@ export function MapView({
   // Latest group-hover mapping in a ref so the map's mousemove handler
   // (installed once at load) sees fresh state on every move.
   const muniHoverGroupsRef = useRef<
-    Map<string, { slugs: string[]; label: string }> | undefined
+    | Map<string, { slugs: string[]; label: string; count: number | null }>
+    | undefined
   >(muniHoverGroups);
   muniHoverGroupsRef.current = muniHoverGroups;
+
+  // Same ref-pattern for per-muni counts + feature label — the
+  // mousemove handler is installed once at load and reads these via
+  // ref so the tooltip text stays in sync with React state.
+  const muniHoverCountsRef = useRef<Map<string, number> | null>(
+    muniHoverCounts ?? null,
+  );
+  muniHoverCountsRef.current = muniHoverCounts ?? null;
+  const featureLabelRef = useRef<string | null>(featureLabel ?? null);
+  featureLabelRef.current = featureLabel ?? null;
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -482,13 +507,34 @@ export function MapView({
         }
 
         map.getCanvas().style.cursor = "pointer";
+
+        // Count subtitle. Group case: count is carried on the group
+        // entry (pre-computed in App for the subregion total). Single-
+        // muni case: look up by slug in muniHoverCounts. When the
+        // current query has no count data (no query yet), we skip the
+        // subtitle entirely.
+        const counts = muniHoverCountsRef.current;
+        const label = featureLabelRef.current;
+        const n =
+          group && group.count !== null
+            ? group.count
+            : counts
+              ? (counts.get(slug) ?? 0)
+              : null;
+        const subtitle =
+          n !== null && label
+            ? `<div class='text-xs text-slate-500 mt-0.5'><span class='tabular-nums'>${n.toLocaleString()}</span> ${escapeHtml(label)}</div>`
+            : n !== null
+              ? `<div class='text-xs text-slate-500 mt-0.5 tabular-nums'>${n.toLocaleString()}</div>`
+              : "";
+
         if (hoveredLabel) {
           popup
             .setLngLat(e.lngLat)
             .setHTML(
               `<div class='text-sm font-medium text-slate-800'>${escapeHtml(
                 hoveredLabel,
-              )}</div>`,
+              )}</div>${subtitle}`,
             )
             .addTo(map);
         }

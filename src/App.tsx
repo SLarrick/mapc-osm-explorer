@@ -448,23 +448,13 @@ function App() {
     };
   }, [regionMeta, isRegion, binBy, munis]);
 
-  // Default-on-when-over-threshold, default-off-when-under-threshold
-  // for region scope. Rationale: under threshold the points are the
-  // useful render; over threshold points would be noise so the
-  // choropleth is the answer.
-  //
-  // Subregion scope is different: the whole point of picking a
-  // subregion is to look at muni-level aggregation within that
-  // subregion, so the muni choropleth is always the primary signal.
-  // Default ON regardless of renderable.
-  //
-  // User can override with the legend checkbox — the override sticks
-  // for the current query.
-  const defaultChoroplethEnabled = Boolean(
-    choroplethData &&
-      regionMeta &&
-      (isSubregion || !regionMeta.renderable),
-  );
+  // Choropleth defaults ON for every region/subregion query. The
+  // "how many of this thing are where" answer is the point of running
+  // a region query, and shading munis is the clearest way to show it;
+  // the user can still see the raw points underneath because the
+  // choropleth fill is translucent. The user can toggle it off via
+  // the legend checkbox — the override sticks for the current query.
+  const defaultChoroplethEnabled = Boolean(choroplethData && regionMeta);
   const choroplethEnabled =
     choroplethOverride ?? defaultChoroplethEnabled;
 
@@ -544,11 +534,18 @@ function App() {
 
   // Muni-hover groups for the MapView. Populated only in region mode
   // when binBy=subregion — hovering a muni then lights the whole
-  // subregion and shows its name in a tooltip. In any other mode we
-  // leave this undefined so MapView falls back to single-muni hover.
+  // subregion, shows its name, and shows its total feature count. In
+  // any other mode we leave this undefined so MapView falls back to
+  // single-muni hover.
   const muniHoverGroups = useMemo(() => {
     if (!isRegion || binBy !== "subregion") return undefined;
-    const out = new Map<string, { slugs: string[]; label: string }>();
+    const perSubregionCounts = regionMeta
+      ? countsBySubregion(regionMeta.countsByMuni)
+      : null;
+    const out = new Map<
+      string,
+      { slugs: string[]; label: string; count: number | null }
+    >();
     const groupCache = new Map<string, string[]>();
     for (const muni of munis) {
       const subs = subregionsForMuni(muni.slug);
@@ -564,10 +561,18 @@ function App() {
       }
       const sub = getSubregionBySlug(primarySlug);
       const label = sub ? subregionLabel(sub) : primarySlug;
-      out.set(muni.slug, { slugs: group, label });
+      const count = perSubregionCounts?.get(primarySlug) ?? null;
+      out.set(muni.slug, { slugs: group, label, count });
     }
     return out;
-  }, [isRegion, binBy, munis]);
+  }, [isRegion, binBy, munis, regionMeta]);
+
+  // Per-muni counts for the MapView hover tooltip — independent of the
+  // choropleth toggle. Whenever a query has run (region or subregion),
+  // hovering a muni should report its count. In subregion scope we
+  // report the muni's own count even for munis outside the scope (they
+  // still have a 0-or-positive count in the full region map).
+  const muniHoverCounts = regionMeta?.countsByMuni ?? null;
 
   // When a bin is active, highlight the munis that fall into it on the
   // map. In binBy=muni, that's the munis themselves. In binBy=subregion,
@@ -900,6 +905,8 @@ function App() {
                 highlightedMuniSlugs={highlightedMuniSlugs}
                 scopeMuniSlugs={subregionMuniSlugs}
                 muniHoverGroups={muniHoverGroups}
+                muniHoverCounts={muniHoverCounts}
+                featureLabel={selectedSubtype?.label.toLowerCase() ?? null}
               />
               {choroplethData && selectedSubtype && (
                 <ChoroplethLegend
