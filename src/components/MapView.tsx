@@ -419,14 +419,17 @@ export function MapView({
       });
 
       // Muni hover highlight. Two modes:
-      //   - Default: single-muni hover. Just lights the muni under
-      //     the cursor; no tooltip (muni names are already a feature
-      //     of the base-map labels).
-      //   - Group hover: when muniHoverGroups is provided, hovering
-      //     any muni lights every muni in its group (e.g. every muni
-      //     in its subregion), and shows a tooltip with the group's
-      //     label. Used in region + binBy=subregion so the user can
+      //   - Default: single-muni hover. Lights the muni under the
+      //     cursor and labels it with its own name.
+      //   - Group hover: when muniHoverGroups is provided for the
+      //     hovered slug, lights every muni in its group (e.g. every
+      //     muni in its subregion) and labels it with the group's
+      //     name. Used in region + binBy=subregion so the user can
       //     see and name the whole subregion from a single hover.
+      //
+      // Either way we always show a tooltip — the base-map labels
+      // aren't visible at MAPC-region zoom, so the hover is the user's
+      // main way to identify what they're pointing at.
       //
       // `hoveredSlugs` tracks what's currently lit so we can clear it
       // cleanly on transition.
@@ -446,14 +449,20 @@ export function MapView({
 
       map.on("mousemove", "munis-fill", (e) => {
         if (!e.features?.length) return;
-        const slug = (e.features[0].properties as { slug?: string } | null)
-          ?.slug;
+        const props = e.features[0].properties as
+          | { slug?: string; name?: string }
+          | null;
+        const slug = props?.slug;
         if (!slug) return;
+        const muniName = props?.name ?? slug;
 
         const groups = muniHoverGroupsRef.current;
         const group = groups?.get(slug);
         const nextSlugs = group ? group.slugs : [slug];
-        const nextLabel = group?.label ?? null;
+        // Group label when available (subregion name), else the muni
+        // name itself — we always want a label so the user can tell
+        // what they're pointing at at regional zoom.
+        const nextLabel = group?.label ?? muniName;
 
         // Cheap identity check: same group → no state churn.
         const sameGroup =
@@ -485,7 +494,7 @@ export function MapView({
         }
       });
       map.on("mouseleave", "munis-fill", () => {
-        if (hoveredLabel) popup.remove();
+        popup.remove();
         clearHover();
         map.getCanvas().style.cursor = "";
       });
