@@ -448,13 +448,22 @@ function App() {
     };
   }, [regionMeta, isRegion, binBy, munis]);
 
-  // Default-on-when-over-threshold, default-off-when-under-threshold.
-  // Rationale: under threshold the points are the useful render; over
-  // threshold the points would be noise so the choropleth is the answer.
+  // Default-on-when-over-threshold, default-off-when-under-threshold
+  // for region scope. Rationale: under threshold the points are the
+  // useful render; over threshold points would be noise so the
+  // choropleth is the answer.
+  //
+  // Subregion scope is different: the whole point of picking a
+  // subregion is to look at muni-level aggregation within that
+  // subregion, so the muni choropleth is always the primary signal.
+  // Default ON regardless of renderable.
+  //
   // User can override with the legend checkbox — the override sticks
   // for the current query.
   const defaultChoroplethEnabled = Boolean(
-    choroplethData && regionMeta && !regionMeta.renderable,
+    choroplethData &&
+      regionMeta &&
+      (isSubregion || !regionMeta.renderable),
   );
   const choroplethEnabled =
     choroplethOverride ?? defaultChoroplethEnabled;
@@ -532,6 +541,33 @@ function App() {
     if (!isSubregion || !selectedMuniSlug) return [];
     return Array.from(munisInSubregion(selectedMuniSlug));
   }, [isSubregion, selectedMuniSlug]);
+
+  // Muni-hover groups for the MapView. Populated only in region mode
+  // when binBy=subregion — hovering a muni then lights the whole
+  // subregion and shows its name in a tooltip. In any other mode we
+  // leave this undefined so MapView falls back to single-muni hover.
+  const muniHoverGroups = useMemo(() => {
+    if (!isRegion || binBy !== "subregion") return undefined;
+    const out = new Map<string, { slugs: string[]; label: string }>();
+    const groupCache = new Map<string, string[]>();
+    for (const muni of munis) {
+      const subs = subregionsForMuni(muni.slug);
+      if (subs.length === 0) continue;
+      // Primary subregion = first-listed (documented in subregions.ts).
+      // Matches the paint choice for multi-subregion munis, so the
+      // hovered group visually matches the shaded color.
+      const primarySlug = subs[0];
+      let group = groupCache.get(primarySlug);
+      if (!group) {
+        group = Array.from(munisInSubregion(primarySlug));
+        groupCache.set(primarySlug, group);
+      }
+      const sub = getSubregionBySlug(primarySlug);
+      const label = sub ? subregionLabel(sub) : primarySlug;
+      out.set(muni.slug, { slugs: group, label });
+    }
+    return out;
+  }, [isRegion, binBy, munis]);
 
   // When a bin is active, highlight the munis that fall into it on the
   // map. In binBy=muni, that's the munis themselves. In binBy=subregion,
@@ -863,6 +899,7 @@ function App() {
                 choropleth={mapChoropleth}
                 highlightedMuniSlugs={highlightedMuniSlugs}
                 scopeMuniSlugs={subregionMuniSlugs}
+                muniHoverGroups={muniHoverGroups}
               />
               {choroplethData && selectedSubtype && (
                 <ChoroplethLegend
@@ -902,6 +939,7 @@ function App() {
               scope={tableScope}
               onScopeChange={(s) => setTableScopeOverride(s)}
               canToggleScope={canToggleTableScope}
+              canScopeToSubregion={isRegion}
             />
           ) : (
             <SummaryView

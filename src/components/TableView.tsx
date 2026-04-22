@@ -41,9 +41,15 @@ import {
   downloadCsv,
   featureRowsToCsv,
   muniRowsToCsv,
+  subregionRowsToCsv,
 } from "../lib/csvExport";
+import {
+  SUBREGIONS,
+  countsBySubregion,
+  munisInSubregion,
+} from "../lib/subregions";
 
-export type TableScope = "feature" | "muni";
+export type TableScope = "feature" | "muni" | "subregion";
 
 interface Props {
   /** Feature rows for the current query. Empty or null when there's no
@@ -69,6 +75,10 @@ interface Props {
   /** True when both scopes are available (region query with renderable
    *  features). False in focused mode or when we only have a count. */
   canToggleScope: boolean;
+  /** Whether the "By subregion" scope option is offered. True in region
+   *  mode; false when the query is already scoped to a subregion (the
+   *  single-row rollup at that point is trivial). */
+  canScopeToSubregion?: boolean;
 }
 
 // ---- Feature-scope columns ----------------------------------------------
@@ -132,6 +142,16 @@ type MuniRow = {
   count: number;
 };
 
+// ---- Subregion-scope columns -------------------------------------------
+
+type SubregionRow = {
+  slug: string;
+  name: string;
+  acronym: string;
+  muniCount: number;
+  count: number;
+};
+
 // ---- Component ----------------------------------------------------------
 
 export function TableView(props: Props) {
@@ -147,6 +167,7 @@ export function TableView(props: Props) {
     scope,
     onScopeChange,
     canToggleScope,
+    canScopeToSubregion,
   } = props;
 
   const featureRows = useMemo<FeatureRow[]>(
@@ -164,8 +185,21 @@ export function TableView(props: Props) {
     }));
   }, [munis, countsByMuni]);
 
+  const subregionRows = useMemo<SubregionRow[]>(() => {
+    if (!countsByMuni) return [];
+    const totals = countsBySubregion(countsByMuni);
+    return SUBREGIONS.map((s) => ({
+      slug: s.slug,
+      name: s.name,
+      acronym: s.acronym,
+      muniCount: munisInSubregion(s.slug).size,
+      count: totals.get(s.slug) ?? 0,
+    }));
+  }, [countsByMuni]);
+
   const featureCount = features?.length ?? 0;
   const muniCount = muniRows.length;
+  const subregionCount = subregionRows.length;
 
   // CSV export. Feature scope → one row per feature with geometry_geojson.
   // Muni scope → one row per MAPC muni with the count. Button is disabled
@@ -173,7 +207,9 @@ export function TableView(props: Props) {
   const canDownloadCsv =
     scope === "feature"
       ? (features?.length ?? 0) > 0
-      : muniRows.length > 0 && countsByMuni !== null;
+      : scope === "subregion"
+        ? subregionRows.length > 0 && countsByMuni !== null
+        : muniRows.length > 0 && countsByMuni !== null;
   const slugBit = subtypeLabel
     ? subtypeLabel.toLowerCase().replace(/[^a-z0-9]+/g, "-")
     : "features";
@@ -182,6 +218,9 @@ export function TableView(props: Props) {
     if (scope === "feature") {
       const csv = featureRowsToCsv(features ?? []);
       downloadCsv(csv, `${slugBit}.csv`);
+    } else if (scope === "subregion" && countsByMuni) {
+      const csv = subregionRowsToCsv(countsByMuni);
+      downloadCsv(csv, `${slugBit}-by-subregion.csv`);
     } else if (countsByMuni) {
       const csv = muniRowsToCsv(munis, countsByMuni);
       downloadCsv(csv, `${slugBit}-by-muni.csv`);
@@ -206,6 +245,11 @@ export function TableView(props: Props) {
               {" "}— {muniCount} municipalit{muniCount === 1 ? "y" : "ies"}
             </span>
           ) : null}
+          {scope === "subregion" && countsByMuni ? (
+            <span className="text-slate-500">
+              {" "}— {subregionCount} subregion{subregionCount === 1 ? "" : "s"}
+            </span>
+          ) : null}
         </div>
 
         <div className="flex items-center gap-2">
@@ -215,6 +259,8 @@ export function TableView(props: Props) {
               onChange={onScopeChange}
               featureCount={featureCount}
               muniCount={muniCount}
+              subregionCount={subregionCount}
+              canScopeToSubregion={canScopeToSubregion ?? false}
             />
           )}
           <button
@@ -229,7 +275,9 @@ export function TableView(props: Props) {
             title={
               scope === "feature"
                 ? "Download one row per feature, with geometry as GeoJSON"
-                : "Download one row per MAPC municipality, with counts"
+                : scope === "subregion"
+                  ? "Download one row per MAPC subregion, with counts"
+                  : "Download one row per MAPC municipality, with counts"
             }
           >
             Download CSV
@@ -237,7 +285,12 @@ export function TableView(props: Props) {
         </div>
       </div>
 
-      {scope === "muni" ? (
+      {scope === "subregion" ? (
+        <SubregionTable
+          rows={subregionRows}
+          onSelectSubregion={onSelectMuni}
+        />
+      ) : scope === "muni" ? (
         <MuniTable
           rows={muniRows}
           onSelectMuni={onSelectMuni}
@@ -269,8 +322,17 @@ function ScopeToggle(props: {
   onChange: (s: TableScope) => void;
   featureCount: number;
   muniCount: number;
+  subregionCount: number;
+  canScopeToSubregion: boolean;
 }) {
-  const { scope, onChange, featureCount, muniCount } = props;
+  const {
+    scope,
+    onChange,
+    featureCount,
+    muniCount,
+    subregionCount,
+    canScopeToSubregion,
+  } = props;
   const btn = (s: TableScope, label: string, count: number) => (
     <button
       onClick={() => onChange(s)}
@@ -301,6 +363,7 @@ function ScopeToggle(props: {
     >
       {btn("feature", "By feature", featureCount)}
       {btn("muni", "By municipality", muniCount)}
+      {canScopeToSubregion && btn("subregion", "By subregion", subregionCount)}
     </div>
   );
 }
@@ -660,6 +723,129 @@ function MuniTable(props: {
             <tr
               key={row.id}
               onClick={() => onSelectMuni(row.original.slug)}
+              className={
+                "cursor-pointer " +
+                (i % 2 === 0
+                  ? "bg-white hover:bg-sky-50"
+                  : "bg-slate-50/50 hover:bg-sky-50")
+              }
+            >
+              {row.getVisibleCells().map((cell) => (
+                <td
+                  key={cell.id}
+                  className="px-3 py-1.5 border-r border-b border-slate-100 last:border-r-0 text-slate-800"
+                  style={{ width: cell.column.getSize() }}
+                >
+                  {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ---- Subregion-aggregate table -----------------------------------------
+
+function SubregionTable(props: {
+  rows: SubregionRow[];
+  /** Subregion slugs share the `muni` URL-state key — see
+   *  subregions.ts slug-collision note. Row click routes via the same
+   *  onSelectMuni handler used for munis. */
+  onSelectSubregion: (slug: string) => void;
+}) {
+  const { rows, onSelectSubregion } = props;
+  const columns = useMemo<ColumnDef<SubregionRow>[]>(
+    () => [
+      {
+        id: "acronym",
+        header: "Acronym",
+        accessorKey: "acronym",
+        size: 90,
+      },
+      {
+        id: "name",
+        header: "Subregion",
+        accessorKey: "name",
+        size: 320,
+      },
+      {
+        id: "muniCount",
+        header: "Munis",
+        accessorKey: "muniCount",
+        size: 90,
+        cell: (ctx) => (
+          <span className="tabular-nums">
+            {(ctx.getValue() as number).toLocaleString()}
+          </span>
+        ),
+      },
+      {
+        id: "count",
+        header: "Count",
+        accessorKey: "count",
+        size: 120,
+        sortingFn: (a, b) =>
+          (a.original.count ?? 0) - (b.original.count ?? 0),
+        cell: (ctx) => (
+          <span className="tabular-nums">
+            {(ctx.getValue() as number).toLocaleString()}
+          </span>
+        ),
+      },
+    ],
+    [],
+  );
+
+  const [sorting, setSorting] = useState<SortingState>([
+    { id: "count", desc: true },
+  ]);
+
+  const table = useReactTable({
+    data: rows,
+    columns,
+    state: { sorting },
+    onSortingChange: setSorting,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+  });
+
+  return (
+    <div className="overflow-auto max-h-[560px]">
+      <table className="text-xs w-full border-collapse">
+        <thead className="sticky top-0 bg-slate-50 border-b border-slate-200">
+          {table.getHeaderGroups().map((hg) => (
+            <tr key={hg.id}>
+              {hg.headers.map((h) => (
+                <th
+                  key={h.id}
+                  scope="col"
+                  className="text-left px-3 py-2 font-medium text-slate-700 border-r border-slate-200 last:border-r-0 cursor-pointer select-none"
+                  style={{ width: h.getSize() }}
+                  onClick={h.column.getToggleSortingHandler()}
+                >
+                  <span className="inline-flex items-center gap-1">
+                    {flexRender(h.column.columnDef.header, h.getContext())}
+                    <span className="text-slate-400">
+                      {h.column.getIsSorted() === "asc"
+                        ? "↑"
+                        : h.column.getIsSorted() === "desc"
+                          ? "↓"
+                          : ""}
+                    </span>
+                  </span>
+                </th>
+              ))}
+            </tr>
+          ))}
+        </thead>
+        <tbody>
+          {table.getRowModel().rows.map((row, i) => (
+            <tr
+              key={row.id}
+              onClick={() => onSelectSubregion(row.original.slug)}
               className={
                 "cursor-pointer " +
                 (i % 2 === 0

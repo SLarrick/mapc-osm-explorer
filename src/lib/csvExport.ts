@@ -21,6 +21,11 @@
  */
 import type { ResultFeature } from "./queries";
 import type { MuniSummary } from "./geo";
+import {
+  SUBREGIONS,
+  countsBySubregion,
+  munisInSubregion,
+} from "./subregions";
 
 /** RFC-4180 field: quote everything, double internal quotes. */
 function csvField(v: unknown): string {
@@ -98,6 +103,38 @@ export function muniRowsToCsv(
   for (const m of sorted) {
     lines.push(
       csvRow([m.slug, m.name, m.subregion ?? "", counts.get(m.slug) ?? 0]),
+    );
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Subregion-scope CSV: one row per MAPC subregion with its total count
+ * and the number of member munis. Counts are computed the same way as
+ * the on-screen aggregation — multi-subregion munis contribute to each
+ * of their subregions (see countsBySubregion for the rationale).
+ */
+export function subregionRowsToCsv(
+  counts: Map<string, number>,
+): string {
+  const header = ["subregion_slug", "acronym", "name", "muni_count", "count"];
+  const lines: string[] = [csvRow(header)];
+  const totals = countsBySubregion(counts);
+  const sorted = [...SUBREGIONS].sort((a, b) => {
+    const ca = totals.get(a.slug) ?? 0;
+    const cb = totals.get(b.slug) ?? 0;
+    if (ca !== cb) return cb - ca;
+    return a.acronym.localeCompare(b.acronym);
+  });
+  for (const s of sorted) {
+    lines.push(
+      csvRow([
+        s.slug,
+        s.acronym,
+        s.name,
+        munisInSubregion(s.slug).size,
+        totals.get(s.slug) ?? 0,
+      ]),
     );
   }
   return lines.join("\n");

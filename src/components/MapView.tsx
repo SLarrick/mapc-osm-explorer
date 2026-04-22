@@ -66,6 +66,15 @@ interface MapViewProps {
    *  Empty array = no subregion scope (landing / region / single-muni).
    */
   scopeMuniSlugs?: string[];
+  /** Group hover. When set, hovering any muni applies the hover state
+   *  to every muni slug in its group (not just the one under the
+   *  cursor), and the tooltip shows the group's display label. Used
+   *  in region + binBy=subregion mode so the user sees the whole
+   *  subregion light up together with its name. Keyed by muni slug,
+   *  value = (group slugs including self, group display label). When
+   *  undefined, MapView falls back to single-muni hover with no
+   *  tooltip (default behavior). */
+  muniHoverGroups?: Map<string, { slugs: string[]; label: string }>;
 }
 
 // Layer ids we hit-test for the hover tooltip. The circle layer rides the
@@ -196,6 +205,7 @@ export function MapView({
   choropleth,
   highlightedMuniSlugs,
   scopeMuniSlugs,
+  muniHoverGroups,
 }: MapViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -229,6 +239,13 @@ export function MapView({
   // applied once the map-load handler has registered its layers.
   const scopeMuniSlugsRef = useRef<string[]>(scopeMuniSlugs ?? []);
   scopeMuniSlugsRef.current = scopeMuniSlugs ?? [];
+
+  // Latest group-hover mapping in a ref so the map's mousemove handler
+  // (installed once at load) sees fresh state on every move.
+  const muniHoverGroupsRef = useRef<
+    Map<string, { slugs: string[]; label: string }> | undefined
+  >(muniHoverGroups);
+  muniHoverGroupsRef.current = muniHoverGroups;
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -401,31 +418,75 @@ export function MapView({
         },
       });
 
-      // Muni hover highlight
-      let hoveredId: string | number | null = null;
-      map.on("mousemove", "munis-fill", (e) => {
-        if (!e.features?.length) return;
-        const id = e.features[0].id as string | number | undefined;
-        if (hoveredId !== null && hoveredId !== id) {
+      // Muni hover highlight. Two modes:
+      //   - Default: single-muni hover. Just lights the muni under
+      //     the cursor; no tooltip (muni names are already a feature
+      //     of the base-map labels).
+      //   - Group hover: when muniHoverGroups is provided, hovering
+      //     any muni lights every muni in its group (e.g. every muni
+      //     in its subregion), and shows a tooltip with the group's
+      //     label. Used in region + binBy=subregion so the user can
+      //     see and name the whole subregion from a single hover.
+      //
+      // `hoveredSlugs` tracks what's currently lit so we can clear it
+      // cleanly on transition.
+      let hoveredSlugs: string[] = [];
+      let hoveredLabel: string | null = null;
+
+      const clearHover = () => {
+        for (const s of hoveredSlugs) {
           map.setFeatureState(
-            { source: "mapc-munis", id: hoveredId },
+            { source: "mapc-munis", id: s },
             { hover: false },
           );
         }
-        if (id !== undefined) {
-          hoveredId = id;
-          map.setFeatureState({ source: "mapc-munis", id }, { hover: true });
-          map.getCanvas().style.cursor = "pointer";
+        hoveredSlugs = [];
+        hoveredLabel = null;
+      };
+
+      map.on("mousemove", "munis-fill", (e) => {
+        if (!e.features?.length) return;
+        const slug = (e.features[0].properties as { slug?: string } | null)
+          ?.slug;
+        if (!slug) return;
+
+        const groups = muniHoverGroupsRef.current;
+        const group = groups?.get(slug);
+        const nextSlugs = group ? group.slugs : [slug];
+        const nextLabel = group?.label ?? null;
+
+        // Cheap identity check: same group → no state churn.
+        const sameGroup =
+          nextSlugs.length === hoveredSlugs.length &&
+          nextSlugs.every((s, i) => s === hoveredSlugs[i]);
+
+        if (!sameGroup) {
+          clearHover();
+          hoveredSlugs = nextSlugs;
+          hoveredLabel = nextLabel;
+          for (const s of hoveredSlugs) {
+            map.setFeatureState(
+              { source: "mapc-munis", id: s },
+              { hover: true },
+            );
+          }
+        }
+
+        map.getCanvas().style.cursor = "pointer";
+        if (hoveredLabel) {
+          popup
+            .setLngLat(e.lngLat)
+            .setHTML(
+              `<div class='text-sm font-medium text-slate-800'>${escapeHtml(
+                hoveredLabel,
+              )}</div>`,
+            )
+            .addTo(map);
         }
       });
       map.on("mouseleave", "munis-fill", () => {
-        if (hoveredId !== null) {
-          map.setFeatureState(
-            { source: "mapc-munis", id: hoveredId },
-            { hover: false },
-          );
-          hoveredId = null;
-        }
+        if (hoveredLabel) popup.remove();
+        clearHover();
         map.getCanvas().style.cursor = "";
       });
 
