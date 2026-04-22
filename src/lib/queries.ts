@@ -16,6 +16,7 @@ import {
   getSubtypeBySlug,
   type Subtype,
 } from "./taxonomy";
+import { munisInSubregion } from "./subregions";
 
 export interface ResultFeature extends GeoJSON.Feature<GeoJSON.Geometry> {
   /** Stable per-feature id: "${osm_type}/${osm_id}" (e.g. "way/12345"). Used
@@ -496,6 +497,89 @@ function assignMuni(
     if (pointInArea([lon, lat], m.geom)) return m;
   }
   return null;
+}
+
+/**
+ * Subregion-scoped query. Slice 8.
+ *
+ * A subregion is a subset of the 101 MAPC munis (e.g. the Inner Core
+ * Committee is 21 munis). Rather than running a specialized SQL query,
+ * we lean on the existing region query — which already stamps every
+ * feature with its muni_slug — and post-filter both the feature list
+ * and the per-muni counts to the subregion's munis.
+ *
+ * Why reuse the region query rather than SQL-filter at the parquet level:
+ *   - The region query is cached (DuckDB results live in memory until
+ *     page reload), so a subregion query after a region query for the
+ *     same subtype is essentially free.
+ *   - The subregion's muni set is never that large (3–21 munis) but
+ *     encoding "where muni_slug in (...)" in the parquet query would
+ *     require per-feature muni stamping server-side, which we don't do.
+ *   - The count that matters to users is "how many in my subregion,"
+ *     which is a sum over filtered muni counts — exact, no threshold
+ *     semantics to re-derive.
+ *
+ * Renderability: we inherit the region query's verdict. If the region
+ * total exceeded the render threshold we didn't fetch geometries, so
+ * the subregion slice is also empty and we surface the same "too many
+ * to render" UX.
+ */
+export interface SubregionResult {
+  fc: GeoJSON.FeatureCollection<GeoJSON.Geometry>;
+  /** Total features in the subregion (accurate whether renderable or not). */
+  totalCount: number;
+  /** True when we fetched features in the region pass (same verdict applies). */
+  renderable: boolean;
+  /** True when the region feature pass hit its cap. */
+  truncated: boolean;
+  cap: number;
+  /** Per-muni count map restricted to the subregion's munis. Drives the
+   *  Summary "top munis" breakdown + muni-level choropleth when scoped
+   *  to the subregion. */
+  countsByMuni: Map<string, number>;
+  /** Slug of the subregion this result is scoped to. */
+  subregionSlug: string;
+  centroidsWereSlow: boolean;
+}
+
+export async function findFeaturesInSubregion(
+  subtypeSlug: string,
+  subregionSlug: string,
+): Promise<SubregionResult> {
+  const region = await findFeaturesInRegion(subtypeSlug);
+  const munis = munisInSubregion(subregionSlug);
+
+  // Filter features to those whose centroid-stamped muni falls in the
+  // subregion. Features that didn't get a muni_slug (unusual — parquet
+  // is clipped to MAPC but edge cases happen) are excluded from the
+  // subregion scope. That's the right call: if we can't place them
+  // in a muni, we can't place them in a subregion.
+  const features = region.fc.features.filter((f) => {
+    const slug = (f.properties as { muni_slug?: string | null } | null)
+      ?.muni_slug;
+    return slug != null && munis.has(slug);
+  });
+
+  const countsByMuni = new Map<string, number>();
+  for (const [slug, count] of region.countsByMuni) {
+    if (munis.has(slug)) countsByMuni.set(slug, count);
+  }
+
+  // Source of truth for the headline number: the muni-count sum. Always
+  // correct even when `features` is empty (over-threshold region pass).
+  let totalCount = 0;
+  for (const c of countsByMuni.values()) totalCount += c;
+
+  return {
+    fc: { type: "FeatureCollection", features },
+    totalCount,
+    renderable: region.renderable,
+    truncated: region.truncated,
+    cap: region.cap,
+    countsByMuni,
+    subregionSlug,
+    centroidsWereSlow: region.centroidsWereSlow,
+  };
 }
 
 function binCentroidsIntoMunis(

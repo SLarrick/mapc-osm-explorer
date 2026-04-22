@@ -32,12 +32,22 @@ import { FeaturePicker, MuniPicker, MAPC_REGION_SLUG } from "./components/Picker
 import {
   findFeaturesInMuni,
   findFeaturesInRegion,
+  findFeaturesInSubregion,
   type ResultFeature,
 } from "./lib/queries";
 import { listMunicipalities, type MuniSummary } from "./lib/geo";
 import { getSubtypeBySlug } from "./lib/taxonomy";
 import { computeChoropleth, groupMunisByBin } from "./lib/choropleth";
 import { readUrlState, writeUrlState } from "./lib/urlState";
+import {
+  countsBySubregion,
+  getSubregionBySlug,
+  isSubregionSlug,
+  munisInSubregion,
+  subregionLabel,
+  subregionsForMuni,
+  SUBREGIONS,
+} from "./lib/subregions";
 
 type View = "map" | "table" | "summary";
 
@@ -61,6 +71,11 @@ interface RegionMeta {
   truncated: boolean;
   cap: number;
   countsByMuni: Map<string, number>;
+  /** When populated, the result is scoped to this subregion slug (e.g.
+   *  "icc"). Null = full MAPC region. The shape of the meta object is
+   *  identical in both cases — a subregion query is just a region query
+   *  post-filtered to the subregion's munis (see queries.ts). */
+  subregionSlug: string | null;
 }
 
 /**
@@ -133,6 +148,12 @@ function App() {
   //                  legend to expand + highlight on the map. null = none.
   const [pointsOverride, setPointsOverride] = useState<boolean | null>(null);
   const [activeBin, setActiveBin] = useState<number | null>(null);
+  // Slice 8B — "Bin by" toggle. Only meaningful in region mode (full
+  // MAPC). Subregion scope is already a muni-granularity view. Muni is
+  // the default because most users start by asking "where are the
+  // hotspots at town scale"; flipping to subregion summarizes the same
+  // counts at the 8 planning districts instead.
+  const [binBy, setBinBy] = useState<"muni" | "subregion">("muni");
 
   // Load manifest categories + muni list once on mount.
   useEffect(() => {
@@ -180,10 +201,13 @@ function App() {
       setSelectedSubtypeSlug(null);
       return;
     }
-    // Clear stale muni slug (region is always valid).
+    // Clear stale muni slug (region sentinel + subregion slugs are
+    // always valid — no catalog dependency). Actual muni slugs get
+    // checked against the loaded munis list.
     if (
       selectedMuniSlug &&
       selectedMuniSlug !== MAPC_REGION_SLUG &&
+      !isSubregionSlug(selectedMuniSlug) &&
       !munis.some((m) => m.slug === selectedMuniSlug)
     ) {
       setSelectedMuniSlug(null);
@@ -236,6 +260,7 @@ function App() {
     setTableScopeOverride(null);
     setPointsOverride(null);
     setActiveBin(null);
+    setBinBy("muni");
     if (hadActiveQuery && selectedSubtypeSlug && selectedMuniSlug) {
       void handleFind();
     }
@@ -245,6 +270,12 @@ function App() {
   }, [selectedMuniSlug, selectedSubtypeSlug]);
 
   const isRegion = selectedMuniSlug === MAPC_REGION_SLUG;
+  const isSubregion = isSubregionSlug(selectedMuniSlug);
+  const selectedSubregion = useMemo(
+    () =>
+      selectedMuniSlug ? getSubregionBySlug(selectedMuniSlug) : null,
+    [selectedMuniSlug],
+  );
 
   async function handleFind() {
     if (!selectedSubtypeSlug || !selectedMuniSlug) return;
@@ -252,7 +283,22 @@ function App() {
     setError(null);
     setSelectedId(null);
     try {
-      if (isRegion) {
+      if (isSubregion) {
+        const res = await findFeaturesInSubregion(
+          selectedSubtypeSlug,
+          selectedMuniSlug,
+        );
+        setResults(res.fc);
+        setRegionMeta({
+          total: res.totalCount,
+          renderable: res.renderable,
+          truncated: res.truncated,
+          cap: res.cap,
+          countsByMuni: res.countsByMuni,
+          subregionSlug: res.subregionSlug,
+        });
+        setFocusedMeta(null);
+      } else if (isRegion) {
         const res = await findFeaturesInRegion(selectedSubtypeSlug);
         setResults(res.fc);
         setRegionMeta({
@@ -261,6 +307,7 @@ function App() {
           truncated: res.truncated,
           cap: res.cap,
           countsByMuni: res.countsByMuni,
+          subregionSlug: null,
         });
         setFocusedMeta(null);
       } else {
@@ -309,6 +356,10 @@ function App() {
 
   // Focus mode is "I've picked one specific muni." Region doesn't count —
   // there's no single muni to frame the page around.
+  // `focused` drives the compact focused-mode bar layout. Both a single
+  // muni AND a subregion use it — "Inner Core Committee" reads more
+  // naturally as a focused heading than as a landing dropdown, and the
+  // "← back to MAPC region" affordance applies identically.
   const focused = Boolean(selectedMuniSlug) && !isRegion;
 
   // Post-query coverage caveat: attached to the result line in both
@@ -333,19 +384,69 @@ function App() {
 
   /** For the MapView, region-mode looks the same as no-selection: no
    *  focus paint, no fit-bounds-to-muni. Pass null to opt out of those. */
-  const mapMuniSlug = isRegion ? null : selectedMuniSlug;
+  // Only pass a muni slug to the MapView when it's an actual muni. Region
+  // and subregion scopes are handled via fit-bounds + highlight layers,
+  // not via the selected-muni outline.
+  const mapMuniSlug =
+    isRegion || isSubregion ? null : selectedMuniSlug;
 
-  // Choropleth bins: only in region mode, only after a region query has
-  // run. Focused mode passes null to MapView so the muni-fill reverts to
-  // the neighbor-dim post-selection style. Bins are recomputed whenever
-  // the count map changes — cheap (101 values, O(n log n)).
+  // Choropleth data. Three shapes depending on scope + binBy:
+  //
+  //   region + binBy=muni:       101 munis, each shaded by its own count.
+  //   region + binBy=subregion:  8 subregions, each subregion's munis
+  //                              share its total. Bins computed on the
+  //                              8 subregion totals.
+  //   subregion:                 21-ish munis in the subregion shaded by
+  //                              their own counts; non-subregion munis
+  //                              absent from counts → render as zero.
+  //                              (binBy=subregion collapses the view to
+  //                              a single value, so it's not offered.)
+  //   focused muni:              null (no choropleth).
+  //
+  // The legend consumes `entityCounts` + `entityNameBySlug` to render
+  // bin rows. `paintCountsByMuni` is what gets pushed into the map's
+  // feature-state — it's always keyed by muni slug because the map
+  // draws muni polygons.
   const choroplethData = useMemo(() => {
-    if (!isRegion || !regionMeta) return null;
+    if (!regionMeta) return null;
+
+    // Build name lookups we might need.
+    const muniNames = new Map<string, string>();
+    for (const m of munis) muniNames.set(m.slug, m.name);
+    const subregionNames = new Map<string, string>();
+    for (const s of SUBREGIONS) subregionNames.set(s.slug, subregionLabel(s));
+
+    if (isRegion && binBy === "subregion") {
+      const subTotals = countsBySubregion(regionMeta.countsByMuni);
+      const bins = computeChoropleth(subTotals);
+      // Per-muni paint counts: each muni gets its primary subregion's
+      // total (for multi-subregion munis, the first-listed — documented
+      // in subregions.ts).
+      const paintCounts = new Map<string, number>();
+      for (const muni of munis) {
+        const subs = subregionsForMuni(muni.slug);
+        if (subs.length === 0) continue;
+        paintCounts.set(muni.slug, subTotals.get(subs[0]) ?? 0);
+      }
+      return {
+        entityKind: "subregion" as const,
+        entityCounts: subTotals,
+        entityNameBySlug: subregionNames,
+        paintCountsByMuni: paintCounts,
+        bins,
+      };
+    }
+
+    // binBy=muni (default) — works for both region and subregion scope.
+    const counts = regionMeta.countsByMuni;
     return {
-      counts: regionMeta.countsByMuni,
-      bins: computeChoropleth(regionMeta.countsByMuni),
+      entityKind: "muni" as const,
+      entityCounts: counts,
+      entityNameBySlug: muniNames,
+      paintCountsByMuni: counts,
+      bins: computeChoropleth(counts),
     };
-  }, [isRegion, regionMeta]);
+  }, [regionMeta, isRegion, binBy, munis]);
 
   // Default-on-when-over-threshold, default-off-when-under-threshold.
   // Rationale: under threshold the points are the useful render; over
@@ -374,8 +475,16 @@ function App() {
 
   // MapView only paints the choropleth when enabled. When disabled,
   // passing null reverts to the pre-selection / post-selection fill,
-  // which in region mode is the ambient neutral fill.
-  const mapChoropleth = choroplethEnabled ? choroplethData : null;
+  // which in region mode is the ambient neutral fill. The MapView
+  // consumes `counts` keyed by muni slug — in binBy=subregion mode,
+  // that's the per-muni-by-primary-subregion total we derived above.
+  const mapChoropleth =
+    choroplethEnabled && choroplethData
+      ? {
+          counts: choroplethData.paintCountsByMuni,
+          bins: choroplethData.bins,
+        }
+      : null;
 
   // Points-on-map state.
   //
@@ -394,24 +503,37 @@ function App() {
   // off, we pass null so the circle / fill / line layers go empty.
   const mapResults = pointsEnabled ? results : null;
 
-  // Slug → name lookup for the legend's expanded muni list + map tooltips.
-  const muniNameBySlug = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const muni of munis) m.set(muni.slug, muni.name);
-    return m;
-  }, [munis]);
+  // Set of muni slugs belonging to the active subregion — empty outside
+  // subregion scope. Drives the map's dashed scope outline, the
+  // initial fit-bounds to the subregion envelope, and the list of
+  // munis the SummaryView's "top munis within subregion" pulls from.
+  const subregionMuniSlugs = useMemo(() => {
+    if (!isSubregion || !selectedMuniSlug) return [];
+    return Array.from(munisInSubregion(selectedMuniSlug));
+  }, [isSubregion, selectedMuniSlug]);
 
-  // When a bin is active, compute the slugs of munis in that bin so the
-  // MapView can outline them and the Legend can list them.
+  // When a bin is active, highlight the munis that fall into it on the
+  // map. In binBy=muni, that's the munis themselves. In binBy=subregion,
+  // it's the union of munis in every subregion whose total falls in
+  // the bin — e.g. clicking the top bin highlights all munis of ICC +
+  // NSTF if both are in the top bin. Gives the user the same "show me
+  // which polygons match this bin" affordance at either granularity.
   const highlightedMuniSlugs = useMemo(() => {
     if (activeBin === null || !choroplethData) return [];
     const grouped = groupMunisByBin(
-      choroplethData.counts,
-      muniNameBySlug,
+      choroplethData.entityCounts,
+      choroplethData.entityNameBySlug,
       choroplethData.bins,
     );
-    return grouped[activeBin]?.map((m) => m.slug) ?? [];
-  }, [activeBin, choroplethData, muniNameBySlug]);
+    const entitySlugs = grouped[activeBin]?.map((e) => e.slug) ?? [];
+    if (choroplethData.entityKind === "muni") return entitySlugs;
+    // Expand subregion slugs to their constituent muni slugs.
+    const out: string[] = [];
+    for (const subSlug of entitySlugs) {
+      for (const s of munisInSubregion(subSlug)) out.push(s);
+    }
+    return out;
+  }, [activeBin, choroplethData]);
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col">
@@ -438,10 +560,21 @@ function App() {
                 <span aria-hidden>←</span> back to MAPC region
               </button>
               <h2 className="text-3xl font-semibold tracking-tight text-slate-900">
-                {selectedMuni?.name ?? "—"}
-                {selectedMuni ? (
-                  <span className="text-slate-400 font-normal">, MA</span>
-                ) : null}
+                {selectedSubregion ? (
+                  <>
+                    {selectedSubregion.name}{" "}
+                    <span className="text-slate-400 font-normal">
+                      ({selectedSubregion.acronym})
+                    </span>
+                  </>
+                ) : selectedMuni ? (
+                  <>
+                    {selectedMuni.name}
+                    <span className="text-slate-400 font-normal">, MA</span>
+                  </>
+                ) : (
+                  "—"
+                )}
               </h2>
             </div>
             <div className="flex flex-wrap items-center gap-x-3 gap-y-3 text-lg">
@@ -482,6 +615,25 @@ function App() {
                       </span>
                     </span>
                   </>
+                ) : isSubregion && regionMeta && !regionMeta.renderable ? (
+                  // Subregion scope + over-threshold at region level (e.g.
+                  // buildings, footpaths). The subregion total is accurate
+                  // from the per-muni counts but we don't have feature
+                  // geometries to render — same treatment as region mode.
+                  <>
+                    <span>
+                      There are{" "}
+                      <strong>
+                        {regionMeta.total.toLocaleString()}
+                      </strong>{" "}
+                      {selectedSubtype?.label.toLowerCase() ?? "features"}{" "}
+                      in this subregion.
+                    </span>
+                    <span className="text-slate-400 basis-full">
+                      Too many to render as points — pick a muni inside
+                      the subregion to see individual features.
+                    </span>
+                  </>
                 ) : results ? (
                   <>
                     <span>
@@ -507,7 +659,11 @@ function App() {
                   <CoverageCaveat
                     tier={selectedSubtype.completeness}
                     subtypeLabel={selectedSubtype.label}
-                    muniName={selectedMuni?.name ?? null}
+                    muniName={
+                      selectedSubregion
+                        ? subregionLabel(selectedSubregion)
+                        : selectedMuni?.name ?? null
+                    }
                     className="basis-full"
                   />
                 )}
@@ -685,20 +841,24 @@ function App() {
                 onSelectMuni={setSelectedMuniSlug}
                 choropleth={mapChoropleth}
                 highlightedMuniSlugs={highlightedMuniSlugs}
+                scopeMuniSlugs={subregionMuniSlugs}
               />
               {choroplethData && selectedSubtype && (
                 <ChoroplethLegend
                   bins={choroplethData.bins}
                   subtypeLabel={selectedSubtype.label}
-                  counts={choroplethData.counts}
-                  muniNameBySlug={muniNameBySlug}
+                  entityCounts={choroplethData.entityCounts}
+                  entityNameBySlug={choroplethData.entityNameBySlug}
+                  entityKind={choroplethData.entityKind}
+                  binBy={binBy}
+                  onBinByChange={isRegion ? setBinBy : undefined}
                   pointsEnabled={pointsEnabled}
                   onTogglePoints={(v) => setPointsOverride(v)}
                   choroplethEnabled={choroplethEnabled}
                   onToggleChoropleth={(v) => setChoroplethOverride(v)}
                   activeBin={activeBin}
                   onBinSelect={setActiveBin}
-                  onSelectMuni={setSelectedMuniSlug}
+                  onSelectEntity={setSelectedMuniSlug}
                 />
               )}
               {selectedFeature && (
@@ -729,7 +889,14 @@ function App() {
               munis={munis}
               subtype={selectedSubtype}
               focusedMuniName={selectedMuni?.name ?? null}
-              isRegion={isRegion}
+              scope={
+                isRegion ? "region" : isSubregion ? "subregion" : "muni"
+              }
+              subregionLabel={
+                selectedSubregion ? subregionLabel(selectedSubregion) : null
+              }
+              regionMetaTotal={regionMeta?.total ?? null}
+              regionRenderable={regionMeta?.renderable ?? null}
               onSelectMuni={setSelectedMuniSlug}
             />
           )}

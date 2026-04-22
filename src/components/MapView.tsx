@@ -54,6 +54,17 @@ interface MapViewProps {
    *  Layered above the selection outline, distinct color so selection
    *  vs bin-highlight are visually separate. */
   highlightedMuniSlugs?: string[];
+  /** Subregion scope: the set of munis in the currently-selected MAPC
+   *  subregion. When non-empty AND there's no single-muni selection, the
+   *  map (a) fits bounds to the union of these munis and (b) draws a
+   *  dashed sky-900 outline that hugs each subregion muni — a visual
+   *  framing for "this is the set you're looking at." Distinct styling
+   *  from the bin-highlight outline (sky-600 solid) so the two can
+   *  coexist visually.
+   *
+   *  Empty array = no subregion scope (landing / region / single-muni).
+   */
+  scopeMuniSlugs?: string[];
 }
 
 // Layer ids we hit-test for the hover tooltip. The circle layer rides the
@@ -183,6 +194,7 @@ export function MapView({
   onSelectMuni,
   choropleth,
   highlightedMuniSlugs,
+  scopeMuniSlugs,
 }: MapViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -210,6 +222,12 @@ export function MapView({
   // apply an initial highlight if one was set before map was ready.
   const highlightedMuniSlugsRef = useRef<string[]>(highlightedMuniSlugs ?? []);
   highlightedMuniSlugsRef.current = highlightedMuniSlugs ?? [];
+
+  // Subregion scope slugs kept in a ref for the same reason — an
+  // initial subregion scope (e.g. ?muni=icc in the URL) needs to be
+  // applied once the map-load handler has registered its layers.
+  const scopeMuniSlugsRef = useRef<string[]>(scopeMuniSlugs ?? []);
+  scopeMuniSlugsRef.current = scopeMuniSlugs ?? [];
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -328,6 +346,25 @@ export function MapView({
         },
       });
 
+      // Subregion-scope outline — drawn around every muni that belongs
+      // to the currently-selected subregion. Slate-900 dashed so it
+      // reads as "this is the framing of what you're looking at" —
+      // semantically closer to the MAPC outer boundary than to the
+      // bin-highlight accent. Drawn BELOW the bin-highlight layer so
+      // an active bin still pops in sky-600 on top of the dashed scope.
+      map.addLayer({
+        id: "munis-scope-outline",
+        type: "line",
+        source: "mapc-munis",
+        filter: ["in", ["get", "slug"], ["literal", []]],
+        paint: {
+          "line-color": "#0f172a", // slate-900
+          "line-width": 1.8,
+          "line-opacity": 0.75,
+          "line-dasharray": [3, 2],
+        },
+      });
+
       // Bin-highlight outline — the legend's "show me which munis are in
       // this bin" affordance. Sky-600 accent so it's visually distinct
       // from the slate-900 selection outline. Filter starts empty,
@@ -431,7 +468,21 @@ export function MapView({
         selectedMuniSlugRef.current,
         choroplethRef.current,
       );
+      applyScopeOutline(map, scopeMuniSlugsRef.current);
       applyBinHighlight(map, highlightedMuniSlugsRef.current);
+      // Initial subregion fit-bounds if we booted into a subregion scope
+      // with no single-muni selection.
+      if (
+        scopeMuniSlugsRef.current.length > 0 &&
+        !selectedMuniSlugRef.current
+      ) {
+        const bbox = unionBboxForSlugs(
+          scopeMuniSlugsRef.current,
+          munisFcRef.current,
+        );
+        if (bbox)
+          map.fitBounds(bbox, { padding: 36, duration: 0, maxZoom: 12 });
+      }
     });
 
     return () => {
@@ -499,6 +550,32 @@ export function MapView({
     if (!map || !mapReadyRef.current) return;
     applyBinHighlight(map, highlightedMuniSlugs ?? []);
   }, [highlightedMuniSlugs]);
+
+  // Sync scopeMuniSlugs prop → scope outline + fit-bounds union.
+  //
+  // Fit-bounds only fires when the scope-set *identity* changes (e.g.
+  // user picks ICC then switches to NSTF). If a single muni is also
+  // selected, the single-muni fit-bounds wins (it's set via the
+  // selectedMuniSlug effect) — no need to guard explicitly because
+  // App.tsx ensures scopeMuniSlugs is empty whenever a muni is selected.
+  const prevScopeKeyRef = useRef<string>("");
+  useEffect(() => {
+    const map = mapRef.current;
+    const slugs = scopeMuniSlugs ?? [];
+    if (!map || !mapReadyRef.current) {
+      prevScopeKeyRef.current = slugs.slice().sort().join(",");
+      return;
+    }
+    applyScopeOutline(map, slugs);
+    const key = slugs.slice().sort().join(",");
+    const changed = key !== prevScopeKeyRef.current;
+    prevScopeKeyRef.current = key;
+    if (changed && slugs.length > 0 && !selectedMuniSlugRef.current) {
+      const bbox = unionBboxForSlugs(slugs, munisFcRef.current);
+      if (bbox)
+        map.fitBounds(bbox, { padding: 36, duration: 600, maxZoom: 12 });
+    }
+  }, [scopeMuniSlugs]);
 
   return (
     <div
@@ -582,6 +659,49 @@ function applyMuniFillPaint(
   }
   map.setPaintProperty("munis-fill", "fill-color", paint.color);
   map.setPaintProperty("munis-fill", "fill-opacity", paint.opacity);
+}
+
+/**
+ * Update the subregion-scope outline filter. Empty list = outline no
+ * munis. Unlike the single-muni selection outline, this can apply to
+ * many polygons at once (up to 21 for the Inner Core Committee).
+ */
+function applyScopeOutline(map: maplibregl.Map, slugs: string[]): void {
+  if (!map.getLayer("munis-scope-outline")) return;
+  map.setFilter("munis-scope-outline", [
+    "in",
+    ["get", "slug"],
+    ["literal", slugs],
+  ]);
+}
+
+/**
+ * Union bbox over the given muni slugs, using the already-loaded muni
+ * feature collection. Returns null if no slugs match (can happen on a
+ * stale URL during catalog load — harmless no-op for fit-bounds).
+ */
+function unionBboxForSlugs(
+  slugs: string[],
+  munisFc: GeoJSON.FeatureCollection | null,
+): [number, number, number, number] | null {
+  if (!munisFc || slugs.length === 0) return null;
+  const set = new Set(slugs);
+  let minX = Infinity,
+    minY = Infinity,
+    maxX = -Infinity,
+    maxY = -Infinity;
+  for (const f of munisFc.features) {
+    const slug = (f.properties as { slug?: string } | null)?.slug;
+    if (!slug || !set.has(slug)) continue;
+    walkCoords(f.geometry, (x, y) => {
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    });
+  }
+  if (minX === Infinity) return null;
+  return [minX, minY, maxX, maxY];
 }
 
 /**

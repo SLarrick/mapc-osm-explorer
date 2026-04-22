@@ -1,21 +1,25 @@
 /**
- * Region-layers legend — floats bottom-left of the map in region mode.
+ * Region-layers legend — floats bottom-left of the map in region /
+ * subregion modes.
  *
- * Holds two toggles for what's drawn on the map:
+ * Holds three controls for what's drawn on the map:
  *   - "Show features"              — toggles the results overlay (works
  *                                    regardless of whether the subtype's
  *                                    geometry is points, lines, or polygons).
  *   - "Shade munis by feature count" — toggles the muni-choropleth fill.
- * Plus the bin legend itself. Clicking a bin row expands it to a
- * scrollable list of munis in that bin (sorted alphabetically), and
- * highlights those munis on the map via `onBinSelect`.
+ *   - Bin by: Muni / Subregion     — only in region mode. Flips the
+ *                                    legend + map between 101-muni and
+ *                                    8-subregion aggregation.
+ * Plus the bin legend itself. Clicking a bin row expands it to a list
+ * of entities (munis or subregions) in that bin, and highlights the
+ * underlying muni polygons on the map via `onBinSelect`.
  *
  * Design notes:
- *   - The two checkboxes are deliberately co-located in one card so
- *     "what am I looking at on the map" lives in a single place.
- *   - The per-bin muni count ("(8 munis)") is trivially derived from
- *     the counts map. Clicking a bin is the discoverable extension:
- *     expand + highlight, click again to collapse/clear.
+ *   - The toggles are deliberately co-located in one card so "what am
+ *     I looking at on the map" lives in a single place.
+ *   - The legend is polymorphic over entity kind (muni vs subregion).
+ *     The map always draws muni polygons — it's App.tsx that derives
+ *     per-muni paint counts from a subregion total when binBy=subregion.
  */
 import { useMemo } from "react";
 import {
@@ -28,11 +32,22 @@ interface Props {
   bins: ChoroplethBins;
   /** Feature label (e.g. "Playgrounds") — used in the header. */
   subtypeLabel: string;
-  /** Per-muni counts. Drives the "N munis" per bin + expanded list. */
-  counts: Map<string, number>;
-  /** Muni slug → name. For display in the expanded list + highlighted
-   *  tooltips. */
-  muniNameBySlug: Map<string, string>;
+  /** Counts keyed by entity slug (muni slug when entityKind=muni,
+   *  subregion slug when entityKind=subregion). Drives the bin rows
+   *  and the expanded list. */
+  entityCounts: Map<string, number>;
+  /** Entity slug → display name. Used in the expanded list. */
+  entityNameBySlug: Map<string, string>;
+  /** Whether each bin row is aggregated at muni or subregion granularity.
+   *  Only affects labels ("N munis" vs "N subregions"). */
+  entityKind: "muni" | "subregion";
+  /** Current bin-by setting — mirrors entityKind but is passed separately
+   *  because the setter belongs to App state. */
+  binBy: "muni" | "subregion";
+  /** When provided, renders a Muni / Subregion segmented control at the
+   *  top of the legend. Omit (undefined) to hide the control — e.g. in
+   *  subregion scope where collapsing to a single value is meaningless. */
+  onBinByChange?: (v: "muni" | "subregion") => void;
   /** Feature-points overlay (the pins/shapes) state. */
   pointsEnabled: boolean;
   onTogglePoints: (enabled: boolean) => void;
@@ -42,44 +57,48 @@ interface Props {
   /** Which bin index (0-5) is currently expanded, or null. */
   activeBin: number | null;
   onBinSelect: (bin: number | null) => void;
-  /** Click a muni name in the expanded list. */
-  onSelectMuni: (slug: string) => void;
+  /** Click an entity name in the expanded list — routes to muni or
+   *  subregion scope. Both use the same `muni=` URL key (see
+   *  subregions.ts slug-collision note). */
+  onSelectEntity: (slug: string) => void;
 }
 
 export function ChoroplethLegend(props: Props) {
   const {
     bins,
     subtypeLabel,
-    counts,
-    muniNameBySlug,
+    entityCounts,
+    entityNameBySlug,
+    entityKind,
+    binBy,
+    onBinByChange,
     pointsEnabled,
     onTogglePoints,
     choroplethEnabled,
     onToggleChoropleth,
     activeBin,
     onBinSelect,
-    onSelectMuni,
+    onSelectEntity,
   } = props;
 
-  const munisByBin = useMemo(
-    () => groupMunisByBin(counts, muniNameBySlug, bins),
-    [counts, muniNameBySlug, bins],
+  const entitiesByBin = useMemo(
+    () => groupMunisByBin(entityCounts, entityNameBySlug, bins),
+    [entityCounts, entityNameBySlug, bins],
   );
 
-  // Drop bins at the top of the ramp that no muni actually falls into.
+  // Drop bins at the top of the ramp that no entity actually falls into.
   // The bin-stops are quantile-derived but occasionally yield an empty
-  // max bin (rounding + ties); showing "944+ · 0 munis" eats real estate
-  // and blunts the contrast of the populated bins by stretching the ramp.
-  //
-  // We keep empty bins in the *middle* of the ramp — those carry useful
-  // "nothing here" information between populated stops. We also omit the
-  // "0 munis" row entirely: white == absent is the intuitive reading.
+  // max bin (rounding + ties). We keep empty middle-of-ramp bins (they
+  // carry useful "nothing here" info) and omit zero-count entities
+  // from the legend entirely (white == absent is intuitive).
   const visibleBinEnd = useMemo(() => {
     for (let i = bins.colors.length - 1; i >= 0; i--) {
-      if (munisByBin[i].length > 0) return i + 1;
+      if (entitiesByBin[i].length > 0) return i + 1;
     }
     return 0;
-  }, [munisByBin, bins.colors.length]);
+  }, [entitiesByBin, bins.colors.length]);
+
+  const entityLabel = entityKind === "muni" ? "muni" : "subregion";
 
   return (
     <div
@@ -109,9 +128,47 @@ export function ChoroplethLegend(props: Props) {
         <span className="text-slate-700">Shade munis by feature count</span>
       </label>
 
+      {onBinByChange && (
+        <div className="flex items-center gap-2 py-0.5 mb-1">
+          <span className="text-slate-500 text-[11px]">Bin by:</span>
+          <div
+            className="inline-flex rounded border border-slate-300 overflow-hidden"
+            role="group"
+            aria-label="Bin-by granularity"
+          >
+            <button
+              type="button"
+              onClick={() => onBinByChange("muni")}
+              aria-pressed={binBy === "muni"}
+              className={
+                "px-2 py-0.5 text-[11px] cursor-pointer " +
+                (binBy === "muni"
+                  ? "bg-sky-600 text-white"
+                  : "bg-white text-slate-700 hover:bg-slate-50")
+              }
+            >
+              Muni
+            </button>
+            <button
+              type="button"
+              onClick={() => onBinByChange("subregion")}
+              aria-pressed={binBy === "subregion"}
+              className={
+                "px-2 py-0.5 text-[11px] cursor-pointer border-l border-slate-300 " +
+                (binBy === "subregion"
+                  ? "bg-sky-600 text-white"
+                  : "bg-white text-slate-700 hover:bg-slate-50")
+              }
+            >
+              Subregion
+            </button>
+          </div>
+        </div>
+      )}
+
       {bins.empty ? (
         <div className="text-slate-500 italic pt-1 border-t border-slate-100">
-          No features found in any MAPC muni.
+          No features found in any MAPC {entityLabel}.
         </div>
       ) : (
         <ul
@@ -121,7 +178,7 @@ export function ChoroplethLegend(props: Props) {
           }
         >
           {bins.colors.slice(0, visibleBinEnd).map((color, i) => {
-            const munis = munisByBin[i];
+            const entities = entitiesByBin[i];
             const isActive = activeBin === i;
             return (
               <li key={i}>
@@ -129,11 +186,9 @@ export function ChoroplethLegend(props: Props) {
                   onClick={() => onBinSelect(isActive ? null : i)}
                   className={
                     "w-full flex items-center gap-2 py-0.5 px-1 -mx-1 rounded cursor-pointer text-left " +
-                    (isActive
-                      ? "bg-sky-50"
-                      : "hover:bg-slate-50")
+                    (isActive ? "bg-sky-50" : "hover:bg-slate-50")
                   }
-                  disabled={munis.length === 0}
+                  disabled={entities.length === 0}
                 >
                   <span
                     className="inline-block w-4 h-3 rounded-sm border border-slate-300/60 shrink-0"
@@ -145,26 +200,27 @@ export function ChoroplethLegend(props: Props) {
                   <span
                     className={
                       "text-[10px] tabular-nums " +
-                      (munis.length === 0
+                      (entities.length === 0
                         ? "text-slate-300"
                         : "text-slate-500")
                     }
                   >
-                    {munis.length} muni{munis.length === 1 ? "" : "s"}
+                    {entities.length} {entityLabel}
+                    {entities.length === 1 ? "" : "s"}
                   </span>
                 </button>
-                {isActive && munis.length > 0 && (
+                {isActive && entities.length > 0 && (
                   <ul className="ml-6 mt-0.5 mb-1 max-h-32 overflow-auto pr-1 text-[11px] space-y-0.5">
-                    {munis.map((m) => (
-                      <li key={m.slug}>
+                    {entities.map((e) => (
+                      <li key={e.slug}>
                         <button
-                          onClick={() => onSelectMuni(m.slug)}
+                          onClick={() => onSelectEntity(e.slug)}
                           className="text-sky-700 hover:text-sky-900 hover:underline cursor-pointer text-left"
                         >
-                          {m.name}
+                          {e.name}
                         </button>
                         <span className="text-slate-400 tabular-nums ml-1">
-                          ({m.count.toLocaleString()})
+                          ({e.count.toLocaleString()})
                         </span>
                       </li>
                     ))}

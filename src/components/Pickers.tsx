@@ -16,6 +16,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { SUBTYPES, type Subtype } from "../lib/taxonomy";
 import type { MuniSummary } from "../lib/geo";
+import {
+  SUBREGIONS,
+  getSubregionBySlug,
+  subregionLabel,
+} from "../lib/subregions";
 
 interface Category {
   slug: string;
@@ -76,14 +81,19 @@ interface MuniPickerProps {
 interface MuniOption {
   slug: string;
   name: string;
-  /** MAPC subregion (shown as secondary context), or "Region-wide" sentinel. */
+  /** MAPC subregion names (shown as secondary context), or the tier
+   *  sentinel ("Region-wide", "Subregion"). */
   subregion: string;
+  /** Option kind — used to add visual dividers between tiers in the list
+   *  (Region-wide → Subregions → Munis) without needing optgroup chrome. */
+  tier: "region" | "subregion" | "muni";
 }
 
 /**
  * Display label for the current selection — "Entire MAPC region" for the
- * sentinel, the muni name for a real slug, or the placeholder prompt
- * when nothing is picked.
+ * sentinel, a subregion's "Name (ACRONYM)" for a subregion slug, the
+ * muni name for a real slug, or the placeholder prompt when nothing
+ * is picked.
  */
 function muniLabelFor(
   value: string | null,
@@ -91,6 +101,8 @@ function muniLabelFor(
 ): string {
   if (!value) return "pick a place";
   if (value === MAPC_REGION_SLUG) return "Entire MAPC region";
+  const sr = getSubregionBySlug(value);
+  if (sr) return subregionLabel(sr);
   return munis.find((m) => m.slug === value)?.name ?? "pick a place";
 }
 
@@ -102,16 +114,27 @@ export function MuniPicker({ munis, value, onChange }: MuniPickerProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
 
-  // Flat option list: [region-wide sentinel, then munis sorted alphabetically
-  // with subregion as secondary text]. We lean on the subregion as *context*
-  // now rather than a navigational primary — it answers "where is this?"
-  // without forcing the user to know it up front.
+  // Three tiers of scope, in geographic-zoom order:
+  //   1. Entire MAPC region (101 munis)
+  //   2. One of 8 MAPC subregions (e.g. Inner Core Committee — 21 munis)
+  //   3. A single muni
+  // The subregion tier is the MAPC-opinionated middle ground that makes
+  // the tool useful for subregional planning work. We lean on the
+  // subregion name as *context* for the muni tier ("where is this?")
+  // so users don't have to know subregion membership up front.
   const options = useMemo<MuniOption[]>(() => {
     const regionOpt: MuniOption = {
       slug: MAPC_REGION_SLUG,
       name: "Entire MAPC region",
       subregion: "Region-wide",
+      tier: "region",
     };
+    const subregionOpts: MuniOption[] = SUBREGIONS.map((s) => ({
+      slug: s.slug,
+      name: subregionLabel(s),
+      subregion: "Subregion",
+      tier: "subregion",
+    }));
     const muniOpts: MuniOption[] = munis
       .slice()
       .sort((a, b) => a.name.localeCompare(b.name))
@@ -119,8 +142,9 @@ export function MuniPicker({ munis, value, onChange }: MuniPickerProps) {
         slug: m.slug,
         name: m.name,
         subregion: m.subregion ?? "Other",
+        tier: "muni",
       }));
-    return [regionOpt, ...muniOpts];
+    return [regionOpt, ...subregionOpts, ...muniOpts];
   }, [munis]);
 
   // Substring match on name + subregion. Case-insensitive, no fancy
@@ -265,7 +289,10 @@ export function MuniPicker({ munis, value, onChange }: MuniPickerProps) {
               filtered.map((o, i) => {
                 const active = i === activeIdx;
                 const selected = o.slug === value;
-                const isRegion = o.slug === MAPC_REGION_SLUG;
+                const prev = filtered[i - 1];
+                // Visual divider on tier transitions: region → subregion,
+                // subregion → muni. Within a tier, no border.
+                const tierChanged = prev && prev.tier !== o.tier;
                 return (
                   <li
                     key={o.slug}
@@ -282,17 +309,19 @@ export function MuniPicker({ munis, value, onChange }: MuniPickerProps) {
                       "px-3 py-1.5 text-sm cursor-pointer flex items-baseline gap-2 " +
                       (active ? "bg-sky-50 " : "") +
                       (selected ? "font-medium " : "") +
-                      (isRegion
-                        ? "border-b border-slate-100 "
+                      (tierChanged
+                        ? "border-t border-slate-100 mt-1 pt-1.5 "
                         : "")
                     }
                   >
                     <span className="text-slate-900 flex-1 truncate">
                       {o.name}
                     </span>
-                    {!isRegion && (
+                    {o.tier !== "region" && (
                       <span className="text-[11px] text-slate-400 truncate">
-                        {o.subregion}
+                        {o.tier === "subregion"
+                          ? "Subregion"
+                          : o.subregion}
                       </span>
                     )}
                   </li>

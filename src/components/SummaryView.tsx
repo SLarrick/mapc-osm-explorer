@@ -27,14 +27,29 @@ import {
 
 interface Props {
   features: ResultFeature[] | null;
-  /** Region-only; null in focused mode. */
+  /** Region or subregion scope; null in focused-muni mode. In subregion
+   *  scope, this is already pre-filtered to the subregion's munis. */
   countsByMuni: Map<string, number> | null;
   munis: MuniSummary[];
   subtype: Subtype | null;
-  /** Focused-muni display name, if applicable. Region = null. */
+  /** Focused-muni display name, if applicable. Otherwise null. */
   focusedMuniName: string | null;
-  /** True when the current query is region-scoped. */
-  isRegion: boolean;
+  /** Current query scope. Drives the headline place label + whether
+   *  the Geographic distribution section appears (it's meaningful for
+   *  region + subregion, not for single-muni). */
+  scope: "region" | "subregion" | "muni";
+  /** When scope === "subregion", the display label for the subregion,
+   *  e.g. "Inner Core Committee (ICC)". Null otherwise. */
+  subregionLabel: string | null;
+  /** Total feature count from the region/subregion query. Used so the
+   *  headline can report the true total even when the rendered feature
+   *  set is empty (over-threshold — no features fetched, counts only). */
+  regionMetaTotal: number | null;
+  /** Whether the region/subregion query fetched feature geometries. When
+   *  false, the features prop is an empty list but the scope is still
+   *  a valid answer — we want to show headline + distribution, not the
+   *  "Run a query" empty state. */
+  regionRenderable: boolean | null;
   onSelectMuni: (slug: string) => void;
 }
 
@@ -45,9 +60,13 @@ export function SummaryView(props: Props) {
     munis,
     subtype,
     focusedMuniName,
-    isRegion,
+    scope,
+    subregionLabel,
+    regionMetaTotal,
+    regionRenderable,
     onSelectMuni,
   } = props;
+  const showDistribution = scope === "region" || scope === "subregion";
 
   const muniNameBySlug = useMemo(() => {
     const m = new Map<string, string>();
@@ -95,7 +114,14 @@ export function SummaryView(props: Props) {
     [countsByMuni],
   );
 
-  if (!features || features.length === 0) {
+  // Over-threshold region/subregion: we have a real total + count map
+  // but no feature payload. Still a valid summary — the Geographic
+  // distribution section is the useful answer. Skip the rich
+  // completeness + top-values sections (they need feature tags).
+  const overThreshold =
+    showDistribution && regionRenderable === false && regionMetaTotal !== null;
+
+  if ((!features || features.length === 0) && !overThreshold) {
     return (
       <div className="rounded-md border border-slate-200 bg-white px-6 py-10 text-center text-sm text-slate-500">
         {features === null
@@ -106,8 +132,18 @@ export function SummaryView(props: Props) {
   }
 
   const label = subtype?.label ?? "features";
-  const place = focusedMuniName ?? "the MAPC region";
-  const n = features.length;
+  const place =
+    scope === "subregion"
+      ? (subregionLabel ?? "this subregion")
+      : scope === "muni"
+        ? (focusedMuniName ?? "this muni")
+        : "the MAPC region";
+  // Headline number: true total when we have it (region/subregion),
+  // else the rendered feature count (single-muni mode).
+  const n = overThreshold
+    ? (regionMetaTotal ?? 0)
+    : (features?.length ?? 0);
+  const hasFeatures = (features?.length ?? 0) > 0;
 
   return (
     <div className="rounded-md border border-slate-200 bg-white overflow-hidden">
@@ -117,7 +153,7 @@ export function SummaryView(props: Props) {
           <span className="tabular-nums">{n.toLocaleString()}</span>{" "}
           {label.toLowerCase()} in {place}
         </h3>
-        {geometryMix && (
+        {geometryMix && hasFeatures && (
           <div className="text-xs text-slate-500 mt-0.5 flex flex-wrap gap-x-3">
             {geometryMix.point > 0 && (
               <span>
@@ -148,13 +184,20 @@ export function SummaryView(props: Props) {
       </div>
 
       <div className="grid gap-5 p-5 md:grid-cols-2">
-        {/* ---- Geographic distribution (region only) ---- */}
-        {isRegion && coverage && (
-          <Section title="Geographic distribution">
+        {/* ---- Geographic distribution (region + subregion) ---- */}
+        {showDistribution && coverage && (
+          <Section
+            title={
+              scope === "subregion"
+                ? "Geographic distribution within subregion"
+                : "Geographic distribution"
+            }
+          >
             <div className="text-xs text-slate-500 mb-2">
               <span className="tabular-nums">{coverage.withFeatures}</span> of{" "}
-              {coverage.total} MAPC munis have at least one mapped{" "}
-              {label.toLowerCase()}.{" "}
+              {coverage.total}{" "}
+              {scope === "subregion" ? "subregion" : "MAPC"} munis have at
+              least one mapped {label.toLowerCase()}.{" "}
               {coverage.withoutFeatures > 0 && (
                 <>
                   {" "}
@@ -190,6 +233,7 @@ export function SummaryView(props: Props) {
         )}
 
         {/* ---- Completeness (top-N fill rates) ---- */}
+        {hasFeatures && (
         <Section title="Tag completeness (top 10)">
           <div className="text-xs text-slate-500 mb-2">
             What share of these {label.toLowerCase()} carry each tag.
@@ -227,8 +271,10 @@ export function SummaryView(props: Props) {
             </div>
           )}
         </Section>
+        )}
 
         {/* ---- Top values per key ---- */}
+        {hasFeatures && (
         <Section
           title="Most common values"
           className="md:col-span-2"
@@ -281,6 +327,7 @@ export function SummaryView(props: Props) {
             )}
           </div>
         </Section>
+        )}
       </div>
     </div>
   );
